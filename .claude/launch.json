@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "flutter-web",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "8765", "--directory", "/Users/ankitfuloria/Desktop/Code/Flutter-Project/schooloFlutter/build/web"],
+      "port": 8765
+    }
+  ]
+}

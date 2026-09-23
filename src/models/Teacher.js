@@ -1,0 +1,106 @@
+const mongoose = require("mongoose");
+
+const addressSchema = new mongoose.Schema(
+  {
+    line1: { type: String, trim: true },
+    line2: { type: String, trim: true },
+    country: { type: String, trim: true },
+    state: { type: String, trim: true },
+    city: { type: String, trim: true },
+    pincode: { type: String, trim: true },
+  },
+  { _id: false }
+);
+
+const familyMemberSchema = new mongoose.Schema(
+  {
+    name: { type: String, trim: true },
+    occupation: { type: String, trim: true },
+    phone: { type: String, trim: true },
+    email: { type: String, trim: true, lowercase: true },
+  },
+  { _id: false }
+);
+
+const teacherSchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true },
+    firstName: { type: String, required: true, trim: true },
+    middleName: { type: String, trim: true },
+    lastName: { type: String, trim: true },
+    dateOfBirth: { type: Date },
+    gender: { type: String, enum: ["male", "female", "other"] },
+    bloodGroup: { type: String },
+    hasDisability: { type: Boolean, default: false },
+    disabilityType: { type: String },
+    disabilityDocumentUrl: { type: String },
+    phone: { type: String, required: true, trim: true },
+    emergencyContact: { type: String, trim: true },
+    countryCode: { type: String, trim: true },
+    landline: { type: String, trim: true },
+    emergencyContactName: { type: String, trim: true },
+    emergencyContactPhone: { type: String, trim: true },
+    presentAddress: { type: addressSchema, default: () => ({}) },
+    permanentAddress: { type: addressSchema, default: () => ({}) },
+    father: { type: familyMemberSchema, default: () => ({}) },
+    mother: { type: familyMemberSchema, default: () => ({}) },
+    spouse: { type: familyMemberSchema, default: () => ({}) },
+    maritalStatus: { type: String, trim: true },
+    weddingDate: { type: Date },
+    nationality: { type: String, trim: true },
+    religion: { type: String, trim: true },
+    motherTongue: { type: String, trim: true },
+    panNumber: { type: String, trim: true, uppercase: true },
+    bankName: { type: String, trim: true },
+    bankAccountNumber: { type: String, trim: true },
+    bankIfscCode: { type: String, trim: true, uppercase: true },
+    iban: { type: String, trim: true, uppercase: true },
+    branchAddress: { type: String, trim: true },
+    routingNumberOrAgentId: { type: String, trim: true },
+    about: { type: String, trim: true },
+    idProofType: { type: String, enum: ["aadhar", "pan", "driving_license", "passport"] },
+    idProofDocumentUrl: { type: String },
+    qualification: { type: String, trim: true },
+    yearsOfExperience: { type: Number, min: 0 },
+    previousOrganization: { type: String, trim: true },
+    previousDesignation: { type: String, trim: true },
+    educationProofDocumentUrl: { type: String },
+    otherDocumentUrl: { type: String },
+    subject: { type: String, required: true },
+    classAssigned: { type: String },
+    employeeId: { type: String, trim: true },
+    staffType: { type: String, trim: true, default: "Teaching" },
+    highestQualification: { type: String, trim: true },
+    department: { type: String, trim: true },
+    designation: { type: String, trim: true },
+    employmentRole: { type: String, trim: true },
+    dateOfJoining: { type: Date },
+    employmentCountry: { type: String, trim: true },
+    employmentState: { type: String, trim: true },
+    workLocation: { type: String, trim: true },
+    natureOfEmployment: { type: String, trim: true },
+    attendanceCode: { type: String, trim: true },
+    transportAttendanceCode: { type: String, trim: true },
+    esiNumber: { type: String, trim: true },
+    epfNumber: { type: String, trim: true },
+    uan: { type: String, trim: true },
+    reportingTo: { type: String, trim: true },
+    rolesAndResponsibilities: { type: String, trim: true },
+    signatureDocumentUrl: { type: String },
+    email: { type: String, lowercase: true, unique: true, sparse: true },
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    assignments: [
+      {
+        classId: { type: mongoose.Schema.Types.ObjectId, ref: "SchoolClass", required: true },
+        subject: { type: String, required: true },
+        _id: false,
+      },
+    ],
+    joinDate: { type: Date, default: Date.now },
+    monthlySalary: { type: Number, default: 0 },
+    status: { type: String, enum: ["active", "inactive"], default: "active" },
+  },
+  { timestamps: true }
+);
+
+module.exports = require("../tenancy/context").tenantModel("Teacher", teacherSchema);

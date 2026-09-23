@@ -1,0 +1,10 @@
+const express = require("express");
+const { requireAuth, requireRole, requirePermission } = require("../middleware/auth");
+const asyncHandler = require("../middleware/asyncHandler");
+const c = require("../controllers/examWorkflowController");
+const router = express.Router();
+router.use(requireAuth, requireRole("principal", "staff"), requirePermission("students"));
+router.get("/", asyncHandler(c.listTransfers));
+router.post("/", asyncHandler(c.initiateTransfer));
+router.post("/:id/complete", requireRole("principal"), asyncHandler(c.completeTransfer));
+module.exports = router;
