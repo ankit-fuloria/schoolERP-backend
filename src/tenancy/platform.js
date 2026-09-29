@@ -45,7 +45,7 @@ async function connect(uri = process.env.OWNER_MONGODB_URI || process.env.MONGOD
   branchSchema.index({ schoolId: 1, isMain: 1 }, { unique: true, partialFilterExpression: { isMain: true } });
   const Branch = connection.model('Branch', branchSchema);
   const principalSchema = schema({ schoolId: ref('School'), email: { type: String, required: true },
-    name: { type: String, required: true }, passwordHash: { type: String, required: true },
+    name: { type: String, required: true }, phone: String, passwordHash: { type: String, required: true },
     active: { type: Boolean, default: true } });
   principalSchema.index({ schoolId: 1, email: 1 }, { unique: true });
   const Principal = connection.model('Principal', principalSchema);

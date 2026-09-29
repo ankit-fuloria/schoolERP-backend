@@ -87,10 +87,11 @@ async function gate(req, res, next) {
   }
 }
 async function principalUser(principal) {
-  const existing = await User.findOne({ email: principal.email });
+  const existing = await User.findOne({ platformPrincipalId: principal._id }) || await User.findOne({ email: principal.email });
   if (existing && existing.role !== 'principal') fail(409, 'Principal email is already used by another account in this branch');
-  return User.findOneAndUpdate({ email: principal.email }, { $set: {
-    name: principal.name, passwordHash: principal.passwordHash, role: 'principal', active: true,
+  return User.findOneAndUpdate(existing ? { _id: existing._id } : { email: principal.email }, { $set: {
+    name: principal.name, email: principal.email, phone: principal.phone,
+    passwordHash: principal.passwordHash, role: 'principal', active: principal.active,
     platformPrincipalId: principal._id,
   } }, { upsert: true, new: true, runValidators: true });
 }

@@ -1,6 +1,7 @@
 const express = require('express');
 const ownerBilling = require('../services/ownerBilling');
 const ownerFinance = require('../services/ownerFinance');
+const ownerSchoolUsers = require('../services/ownerSchoolUsers');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('node:crypto');
@@ -93,6 +94,9 @@ router.get('/completed-invoices', wrap(async (req, res) => res.json(await platfo
 router.put('/payment-settings', wrap(async (req, res) => res.json(await ownerBilling.saveSettings(req.body, req.owner.id))));
 router.get('/billing-reminders', wrap(async (req, res) => res.json(await ownerBilling.reminders())));
 router.get('/schools/:id/payments', wrap(async (req, res) => res.json(await ownerBilling.ledger(req.params.id))));
+router.get('/schools/:id/users', wrap(async (req, res) => res.json(await ownerSchoolUsers.list(req.params.id, req.query))));
+router.patch('/schools/:id/principals/:principalId', wrap(async (req, res) => res.json(await ownerSchoolUsers.updatePrincipal(req.params.id, req.params.principalId, req.body))));
+router.patch('/schools/:id/branches/:branchId/users/:userId', wrap(async (req, res) => res.json(await ownerSchoolUsers.updateBranch(req.params.id, req.params.branchId, req.params.userId, req.body))));
 router.put('/schools/:id/pricing', wrap(async (req, res) => {
   const plan = await ownerBilling.pricing(req.body);
   const session = await platform.connection().startSession();

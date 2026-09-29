@@ -11,6 +11,7 @@ const databases = require('../src/tenancy/connections');
 const { storage, connection } = require('../src/tenancy/context');
 const { gate, runBranch } = require('../src/tenancy/access');
 const User = require('../src/models/User');
+const Teacher = require('../src/models/Teacher');
 const SchoolClass = require('../src/models/SchoolClass');
 const Student = require('../src/models/Student');
 let mongo, app, ownerToken, school, branchA, branchB, otherBranch, principalToken;
@@ -144,6 +145,54 @@ test('shared login returns an owner session for Flutter and restricts owner bill
   assert.ok(!JSON.stringify(bills.body).includes('encryptedUri'));
   await call('get', '/api/owner/invoices', undefined, principalToken).expect(403);
   await call('get', '/api/probe', undefined, shared.body.token).expect(403);
+});
+test('owner lists school users across branches and edits accounts without changing permissions', async () => {
+  const base = `/api/owner/schools/${school._id}`;
+  const listed = (await call('get', `${base}/users`).expect(200)).body;
+  assert.ok(listed.items.some(item => item.role === 'principal' && item.branchId === null));
+  assert.ok(listed.items.some(item => item.role === 'teacher' && item.branchId === String(branchA._id)));
+  assert.ok(listed.items.some(item => item.role === 'teacher' && item.branchId === String(branchB._id)));
+  assert.ok(!JSON.stringify(listed).includes('passwordHash'));
+  assert.ok(!JSON.stringify(listed).includes('encryptedUri'));
+  await call('get', `${base}/users`, undefined, principalToken).expect(403);
+  const filtered = (await call('get', `${base}/users?role=teacher&branchId=${branchB._id}&limit=1`).expect(200)).body;
+  assert.equal(filtered.total, 1);
+  assert.equal(filtered.items[0].branchId, String(branchB._id));
+  assert.equal((await call('get', `${base}/users?search=${encodeURIComponent('teacher@test.com')}`).expect(200)).body.total, 2);
+  assert.equal((await call('get', `${base}/users?search=${encodeURIComponent('teacher@testXcom')}`).expect(200)).body.total, 0);
+  const teacherId = filtered.items[0].id;
+  const path = `${base}/branches/${branchB._id}/users/${teacherId}`;
+  const south = await platform.get().Branch.findById(branchB._id).select('+encryptedUri');
+  await runBranch(school, south, () => Teacher.create({
+    name: 'South Teacher', firstName: 'South', phone: '1234567891',
+    email: 'teacher@test.com', subject: 'Math', userId: teacherId,
+  }));
+  await call('patch', path, { role: 'principal' }).expect(400);
+  await call('patch', path, { email: 'principal@oak.test' }).expect(409);
+  const changed = (await call('patch', path, { name: 'Updated Teacher', email: 'updated-teacher@oak.test', phone: '9876543210', active: false }).expect(200)).body;
+  assert.equal(changed.name, 'Updated Teacher');
+  assert.equal(changed.active, false);
+  await runBranch(school, south, async () => {
+    const user = await User.findById(teacherId);
+    assert.equal(user.role, 'teacher');
+    assert.equal(user.email, 'updated-teacher@oak.test');
+    assert.equal(user.phone, '9876543210');
+    const profile = await Teacher.findOne({ userId: teacherId });
+    assert.equal(profile.name, 'Updated Teacher');
+    assert.equal(profile.email, 'updated-teacher@oak.test');
+    assert.equal(profile.phone, '9876543210');
+    assert.equal(profile.status, 'inactive');
+  });
+  await call('post', '/api/auth/login', { schoolCode: 'oak', branchCode: 'south', email: 'updated-teacher@oak.test', password }, null).expect(403);
+  await call('patch', path, { active: true }).expect(200);
+  await call('post', '/api/auth/login', { schoolCode: 'oak', branchCode: 'south', email: 'updated-teacher@oak.test', password }, null).expect(200);
+  const principal = listed.items.find(item => item.role === 'principal');
+  await call('patch', `${base}/principals/${principal.id}`, { role: 'owner' }).expect(400);
+  await call('patch', `${base}/principals/${principal.id}`, { name: 'Updated Principal', email: 'new-principal@oak.test' }).expect(200);
+  await call('post', '/api/auth/login', { schoolCode: 'oak', branchCode: 'north', email: 'principal@oak.test', password }, null).expect(401);
+  await call('post', '/api/auth/login', { schoolCode: 'oak', branchCode: 'north', email: 'new-principal@oak.test', password }, null).expect(200);
+  await call('patch', `${base}/principals/${principal.id}`, { active: false }).expect(200);
+  await call('post', '/api/auth/login', { schoolCode: 'oak', branchCode: 'north', email: 'new-principal@oak.test', password }, null).expect(401);
 });
 test('owner password change revokes previously issued owner tokens', async () => {
   await call('put', '/api/owner/password', { currentPassword: password, newPassword: 'Changed-Owner-Password1' }).expect(200);
