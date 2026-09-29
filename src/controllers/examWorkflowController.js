@@ -217,10 +217,23 @@ async function getResults(req, res) {
     filter.status = "live";
     filter["students.studentId"] = child._id;
   }
-  const items = await SectionResult.find(filter).populate("cycleId", "name type academicYear maxMarks passMarks datesheetLive")
-    .sort({ createdAt: -1 }).lean();
+  const items = await SectionResult.find(filter)
+    .populate("cycleId", "name type academicYear maxMarks passMarks datesheetLive")
+    .populate("subjects.subjectId", "name code")
+    .sort({ createdAt: -1 })
+    .lean();
   const classTeachers = teacher ? await SchoolClass.find({ classTeacherId: teacher._id }).select("_id") : [];
   for (const item of items) {
+    if (item.subjects) {
+      item.subjects = item.subjects.map(s => {
+        const subName = s.name || s.subjectId?.name || s.subjectName || "Subject";
+        return {
+          ...s,
+          name: subName,
+          subjectName: subName,
+        };
+      });
+    }
     if (child) item.students = item.students.filter(s => same(s.studentId, child._id));
     if (teacher) {
       item.canApprove = classTeachers.some(c => same(c._id, item.classId));

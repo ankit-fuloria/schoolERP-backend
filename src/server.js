@@ -1,6 +1,5 @@
 require("dotenv").config();
 const express = require("express");
-const path = require("path");
 const cors = require("cors");
 const morgan = require("morgan");
 const connectDB = require("./config/db");
@@ -18,8 +17,6 @@ const parentPortalRoutes = require("./routes/parentPortalRoutes");
 const Exam = require("./models/Exam");
 const TimetableEntry = require("./models/TimetableEntry");
 const LibraryBook = require("./models/LibraryBook");
-const TransportRoute = require("./models/TransportRoute");
-const HostelRoom = require("./models/HostelRoom");
 const Announcement = require("./models/Announcement");
 const attendanceRoutes = require("./routes/attendanceRoutes");
 const feesRoutes = require("./routes/feesRoutes");
@@ -31,13 +28,14 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(morgan("dev"));
-app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
 
 app.get("/api/health", (req, res) => res.json({ status: "ok" }));
 app.use('/api/owner', require('./routes/ownerRoutes'));
 app.post('/api/auth/login', require('./routes/ownerRoutes').sharedLogin);
 app.use('/api', require('./tenancy/access').gate);
 app.use('/api/branches', require('./routes/branchAccessRoutes'));
+app.use('/api/media', require('./routes/mediaRoutes'));
+app.get('/api/legacy-media/:folder/:name', require('./routes/mediaRoutes').legacy);
 app.use("/api/auth", authRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/students", studentRoutes);
@@ -76,17 +74,7 @@ app.use(
   "/api/library",
   makeSimpleRouter(LibraryBook, { searchFields: ["title", "author", "isbn"], permission: "library" })
 );
-app.use(
-  "/api/transport",
-  makeSimpleRouter(TransportRoute, {
-    searchFields: ["routeName", "vehicleNumber", "driverName"],
-    permission: "transport",
-  })
-);
-app.use(
-  "/api/hostel",
-  makeSimpleRouter(HostelRoom, { searchFields: ["roomNumber", "block"], permission: "hostel" })
-);
+app.use('/api/transport', require('./routes/transportRoutes'));
 app.use(
   "/api/announcements",
   makeSimpleRouter(Announcement, {
@@ -101,6 +89,7 @@ app.use("/api/audit", auditRoutes);
 app.use((err, req, res, next) => {
   console.error('API error:', err.name, err.status || err.code || 500);
   if (err.status) return res.status(err.status).json({ message: err.message });
+  if (err.name === 'MulterError') return res.status(err.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ message: 'Upload one file up to 400 KB' });
   if (err.name === "ValidationError") return res.status(400).json({ message: err.message });
   if (err.name === "CastError") {
     return res.status(400).json({ message: "Invalid id" });
@@ -117,6 +106,7 @@ connectDB()
   .then(() => require('./tenancy/initialize')())
   .then(() => {
     require('./tenancy/billing').start();
+    require('./services/mediaMaintenance').start();
     app.listen(PORT, () => console.log(`Schoolo API running on port ${PORT}`));
   })
   .catch((err) => {

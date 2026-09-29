@@ -66,6 +66,62 @@ async function listAuditLogs(req, res) {
     AuditLog.countDocuments(filter),
   ]);
 
+  const Student = require("../models/Student");
+  const studentIds = [
+    ...new Set(
+      items
+        .map((i) => i.detail?.studentId)
+        .filter((id) => id && typeof id === "string" && /^[a-fA-F0-9]{24}$/.test(id))
+    ),
+  ];
+  let studentMap = new Map();
+  if (studentIds.length > 0) {
+    try {
+      const students = await Student.find({ _id: { $in: studentIds } })
+        .select("name admissionNo")
+        .lean();
+      studentMap = new Map(students.map((s) => [String(s._id), s]));
+    } catch (_) {}
+  }
+
+  for (const item of items) {
+    if (item.detail && typeof item.detail === "object") {
+      if (item.detail.studentId && studentMap.has(String(item.detail.studentId))) {
+        const st = studentMap.get(String(item.detail.studentId));
+        item.detail.studentName = st.name;
+        if (st.admissionNo) item.detail.admissionNo = st.admissionNo;
+      }
+      // If note is missing or generic, synthesize a human-readable note
+      if (!item.note || item.note === "No description provided" || item.note === "Entry recorded") {
+        if (item.entityType === "Transaction" || item.entityType === "FeeRecord") {
+          const sName = item.detail.studentName ? ` for ${item.detail.studentName}` : "";
+          const months = Array.isArray(item.detail.monthsCovered) && item.detail.monthsCovered.length > 0
+            ? ` (${item.detail.monthsCovered.join(", ")})`
+            : item.detail.month ? ` (${item.detail.month})` : "";
+          const mode = item.detail.paymentMode ? ` via ${String(item.detail.paymentMode).toUpperCase()}` : "";
+          const amt = item.detail.amount != null ? `₹${item.detail.amount}` : "fee";
+          item.note = `Fee payment of ${amt}${sName}${months}${mode} recorded`;
+        }
+      }
+      // Never expose raw technical IDs to the client
+      delete item.detail.studentId;
+      delete item.detail._id;
+      delete item.detail.classId;
+      delete item.detail.teacherId;
+      delete item.detail.chargeId;
+      delete item.detail.cycleId;
+      delete item.detail.planId;
+      delete item.detail.schoolId;
+      delete item.detail.branchId;
+      delete item.detail.userId;
+      delete item.detail.transactionId;
+    }
+    // Remove raw entityId if it's a 24-character hexadecimal ObjectId
+    if (typeof item.entityId === "string" && /^[a-fA-F0-9]{24}$/.test(item.entityId)) {
+      item.entityId = undefined;
+    }
+  }
+
   res.json({
     items,
     total,

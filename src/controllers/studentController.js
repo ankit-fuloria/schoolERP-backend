@@ -239,6 +239,7 @@ async function createStudent(req, res) {
     action: "create",
     detail: { name: student.name, admissionNo: student.admissionNo, classId },
   });
+  await require('../services/mediaStorage').attach(req, 'students', student);
   res.status(201).json(serializeStudent(populated));
 }
 
@@ -279,6 +280,7 @@ async function updateStudent(req, res) {
     action: "update",
     detail: req.body,
   });
+  await require('../services/mediaStorage').attach(req, 'students', student);
   res.json(serializeStudent(student));
 }
 
@@ -322,17 +324,6 @@ async function createReservationOption(req, res) {
   res.status(201).json({ id: option._id, name: option.name });
 }
 
-async function uploadStudentDocument(req, res) {
-  if (!req.file) {
-    return res.status(400).json({ message: "document is required" });
-  }
-
-  res.status(201).json({
-    fileName: req.file.originalname,
-    documentUrl: `/uploads/student-documents/${req.file.filename}`,
-  });
-}
-
 module.exports = {
   listStudents,
   getStudentSummary,
@@ -343,5 +334,4 @@ module.exports = {
   createDisabilityOption,
   listReservationOptions,
   createReservationOption,
-  uploadStudentDocument,
 };

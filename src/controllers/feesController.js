@@ -213,10 +213,10 @@ async function createPayment(req, res) {
   const cents = value => Math.round(value * 100);
   await FeeRecord.init();
   const session = await connection().startSession();
-  let transaction, selectedMonths;
+  let transaction, selectedMonths, student;
   try {
     await session.withTransaction(async () => {
-      const student = await Student.findById(studentId).populate('classId').session(session);
+      student = await Student.findById(studentId).populate('classId').session(session);
       if (!student) { const error = new Error('Student not found'); error.status = 404; throw error; }
       // A write to the student's ledger revision serializes concurrent payments.
       await Student.updateOne({ _id: studentId }, { $inc: { paymentRevision: 1 } }, { session });
@@ -285,9 +285,24 @@ async function createPayment(req, res) {
     }
     throw error;
   } finally { await session.endSession(); }
-  await logAction({ req, entityType: 'Transaction', entityId: transaction._id,
-    action: 'create', detail: { studentId, monthsCovered: transaction.monthsCovered,
-      amount: transaction.amount, discountAmount: transaction.discountAmount, paymentMode } });
+  await logAction({
+    req,
+    entityType: 'Transaction',
+    entityId: transaction._id,
+    action: 'create',
+    detail: {
+      studentName: student.name,
+      className: student.classId?.name,
+      admissionNo: student.admissionNo,
+      monthsCovered: transaction.monthsCovered,
+      amount: transaction.amount,
+      discountAmount: transaction.discountAmount,
+      paymentMode,
+      transactionRef: transactionRef || undefined,
+      remarks: remarks || undefined,
+    },
+    note: `Fee payment of ₹${transaction.amount} collected for ${student.name} (${transaction.monthsCovered.join(', ')}) via ${paymentMode.toUpperCase()}`,
+  });
   res.status(201).json({ transaction, monthsCovered: transaction.monthsCovered,
     amount: transaction.amount });
 }

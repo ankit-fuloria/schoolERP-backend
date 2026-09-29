@@ -1,8 +1,7 @@
-const crypto = require('node:crypto');
 const platform = require('./platform');
 const { fail } = require('./access');
+const mailer = require('../services/mailer');
 const months = { monthly: 1, quarterly: 3, annually: 12 };
-const day = 86400000;
 const istDate = date => new Date(date.getTime() + 330 * 60000).toISOString().slice(0, 10);
 function validDate(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -39,60 +38,26 @@ async function notify(school, key, subject, text, session) {
   }
 }
 async function invoiceNotice(school, invoice, session) {
+  const details = require('../services/ownerBilling').view(invoice);
   await notify(school, `invoice:${invoice._id}:${invoice.status}`, `${school.name}: bill ${invoice.number} ${invoice.status}`,
-    `School: ${school.name} (${school.code})\nBill: ${invoice.number}\n${invoice.description}\nAmount: INR ${(invoice.amountMinor / 100).toFixed(2)}\nDue: ${invoice.dueDate} (IST)\nStatus: ${invoice.status}\nUnpaid overdue bills suspend ERP access for all branches.`, session);
+    `School: ${school.name} (${school.code})\nBill: ${invoice.number}\nType: ${invoice.kind || 'legacy'}\n${invoice.description}\nAmount: INR ${(invoice.amountMinor / 100).toFixed(2)}\nTax: ${invoice.taxPercent || 0}% (INR ${((invoice.taxMinor || 0) / 100).toFixed(2)})\nPaid: INR ${(details.paidMinor / 100).toFixed(2)}\nPending: INR ${(details.outstandingMinor / 100).toFixed(2)}\n${details.installments.map(i => `${i.label}: INR ${(i.amountMinor / 100).toFixed(2)} due ${i.dueDate} (IST)`).join('\n')}\nStatus: ${invoice.status}\n${invoice.status === 'paid' ? 'Payment has been recorded for this bill. Any other unpaid overdue bills must also be settled to restore ERP access.' : invoice.status === 'void' ? 'This bill has been cancelled. No payment is required for this bill.' : 'Please arrange payment by each scheduled due date. Unpaid overdue installments suspend ERP access for all branches.'}`, session);
 }
 async function generate(now = new Date()) {
+  // Invoices are issued by the owner; the worker only sends overdue notices.
   const { School, Invoice } = platform.get();
-  const today = istDate(now);
-  const schools = await School.find({ active: true, 'subscription.nextBillingDate': { $lte: today } }).select('_id');
-  for (const item of schools) {
-    // Bounded catch-up prevents a long outage from monopolizing the worker.
-    for (let i = 0; i < 120; i++) {
-      const session = await platform.connection().startSession();
-      let more = false;
-      try {
-        await session.withTransaction(async () => {
-          const school = await School.findById(item._id).session(session);
-          const s = school?.subscription;
-          more = false;
-          if (!school?.active || !s?.nextBillingDate || s.nextBillingDate > today) return;
-          const dueDate = istDate(new Date(now.getTime() + 15 * day));
-          const maintenance = s.monthlyMaintenanceMinor * months[s.cycle];
-          const [invoice] = await Invoice.create([{
-            schoolId: school._id, number: `INV-${crypto.randomUUID()}`,
-            description: `${s.cycle} ERP subscription (${s.nextBillingDate})`,
-            billingDate: s.nextBillingDate, cycle: s.cycle, cycleAmountMinor: s.cycleAmountMinor,
-            maintenanceAmountMinor: maintenance, amountMinor: s.cycleAmountMinor + maintenance,
-            dueDate, dueAt: new Date(`${dueDate}T23:59:59.999+05:30`),
-            createdBy: s.createdBy, updatedBy: s.createdBy,
-          }], { session });
-          s.nextBillingDate = nextDate(s.nextBillingDate, s.cycle, s.firstBillingDate);
-          await school.save({ session });
-          await invoiceNotice(school, invoice, session);
-          more = s.nextBillingDate <= today;
-        });
-      } catch (error) {
-        // A competing worker already generated this cycle; retry on the next tick.
-        if (error.code !== 11000) throw error;
-      } finally { await session.endSession(); }
-      if (!more) break;
-    }
-  }
-  const overdue = await Invoice.find({ status: 'unpaid', dueAt: { $lt: now } });
+  const overdue = await Invoice.find({ status: { $in: ['unpaid', 'partial'] } });
   for (const invoice of overdue) {
+    const details = require('../services/ownerBilling').view(invoice, now);
+    if (!details.overdue) continue;
     const school = await School.findById(invoice.schoolId);
-    if (school) await notify(school, `overdue:${invoice._id}`, `${school.name}: subscription overdue`,
-      `Bill ${invoice.number} for INR ${(invoice.amountMinor / 100).toFixed(2)} was due ${invoice.dueDate}. ERP access is suspended until payment is recorded.`);
+    if (school) await notify(school, `overdue:${invoice._id}:${details.nextDueDate}`, `${school.name}: subscription overdue`,
+      `Bill: ${invoice.number}\nOverdue amount: INR ${(details.overdueMinor / 100).toFixed(2)}\nPending total: INR ${(details.outstandingMinor / 100).toFixed(2)}\nERP access is suspended until overdue payments are recorded.`);
   }
 }
-let transport;
 async function deliver(send) {
   if (!send) {
     if (!process.env.SMTP_USER || !process.env.SMTP_PASSWORD) return;
-    transport ||= require('nodemailer').createTransport({ host: process.env.SMTP_HOST || 'smtp.gmail.com', port: 465, secure: true,
-      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASSWORD }, connectionTimeout: 15000, socketTimeout: 30000 });
-    send = message => transport.sendMail(message);
+    send = mailer.send;
   }
   const { Mail } = platform.get();
   for (let i = 0; i < 50; i++) {
@@ -102,8 +67,7 @@ async function deliver(send) {
     { $set: { leaseUntil: new Date(now.getTime() + 120000) }, $inc: { attempts: 1 } }, { new: true, sort: { createdAt: 1 } });
     if (!mail) break;
     try {
-      await send({ from: process.env.SMTP_USER, to: mail.to, subject: mail.subject, text: mail.text,
-        messageId: `<${mail._id}@schoolo.erp>` });
+      await send(mailer.message(mail));
       await Mail.updateOne({ _id: mail._id }, { $set: { sentAt: new Date(), lastError: null, leaseUntil: null } });
     } catch (_) {
       // Never persist SMTP errors, which may contain account or authentication data.

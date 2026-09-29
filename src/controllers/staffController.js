@@ -1,6 +1,7 @@
 const bcrypt = require("bcryptjs");
 const Staff = require("../models/Staff");
 const User = require("../models/User");
+const StaffDepartment = require('../models/StaffDepartment');
 const { logAction, redactSecrets } = require("../utils/auditLog");
 
 const DETAIL_FIELDS = [
@@ -64,13 +65,23 @@ function serializeStaff(s) {
   };
 }
 
-// Department is free text on Staff, not a separate collection — this just
-// lists distinct values already in use so the admin UI can offer them as
-// suggestions (cutting down on typo'd duplicates) while still allowing a
-// brand new department name to be typed.
+// Include legacy free-text departments alongside the persisted catalogue.
 async function listDepartments(req, res) {
-  const departments = await Staff.distinct("department");
+  const values = await Promise.all([Staff.distinct('department'), StaffDepartment.distinct('name')]);
+  const departments = [...new Map(values.flat().filter(Boolean).map(name => [name.trim().toLowerCase(), name.trim()])).values()];
   res.json({ departments: departments.filter(Boolean).sort((a, b) => a.localeCompare(b)) });
+}
+
+async function createDepartment(req, res) {
+  const name = req.body.name;
+  if (typeof name !== 'string' || !name.trim() || name.trim().length > 100) return res.status(400).json({ message: 'Enter a department name up to 100 characters' });
+  const key = name.trim().toLowerCase();
+  await StaffDepartment.init();
+  let department;
+  try {
+    department = await StaffDepartment.findOneAndUpdate({ key }, { $setOnInsert: { name: name.trim() } }, { upsert: true, new: true, runValidators: true });
+  } catch (e) { if (e.code !== 11000) throw e; department = await StaffDepartment.findOne({ key }); }
+  res.status(201).json({ name: department.name });
 }
 
 async function list(req, res) {
@@ -118,6 +129,8 @@ async function create(req, res) {
       message: "first name, department, phone, email and password are required",
     });
   }
+  // Validate profile fields before creating a login account.
+  await new Staff({ ...detailValues(req.body), name, firstName, department, email, permissions: cleanPermissions(permissions) }).validate();
 
   const existing = await User.findOne({
     $or: [{ email: email.toLowerCase() }, { phone }],
@@ -170,6 +183,7 @@ async function create(req, res) {
     action: "create",
     detail: redactSecrets(req.body),
   });
+  await require('../services/mediaStorage').attach(req, 'staff', staff);
   res.status(201).json(serializeStaff(staff));
 }
 
@@ -194,6 +208,7 @@ async function update(req, res) {
     staff.name = [staff.firstName, staff.middleName, staff.lastName].filter(Boolean).join(" ").trim();
   }
   await staff.save();
+  await require('../services/mediaStorage').attach(req, 'staff', staff);
 
   if (req.body.password && staff.userId) {
     const passwordHash = await bcrypt.hash(req.body.password, 10);
@@ -238,14 +253,4 @@ async function disable(req, res) {
   res.json(serializeStaff(staff));
 }
 
-async function uploadStaffDocument(req, res) {
-  if (!req.file) {
-    return res.status(400).json({ message: "A document file is required" });
-  }
-  res.status(201).json({
-    fileName: req.file.originalname,
-    documentUrl: `/uploads/staff-documents/${req.file.filename}`,
-  });
-}
-
-module.exports = { list, listDepartments, create, update, disable, uploadStaffDocument };
+module.exports = { list, listDepartments, createDepartment, create, update, disable };

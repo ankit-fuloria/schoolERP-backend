@@ -1,0 +1,142 @@
+const { test, before, after } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+const express = require('express');
+const request = require('supertest');
+const mongoose = require('mongoose');
+const jwt = require('jsonwebtoken');
+const { MongoMemoryReplSet } = require('mongodb-memory-server');
+const Media = require('../src/models/Media');
+const Student = require('../src/models/Student');
+const User = require('../src/models/User');
+const Staff = require('../src/models/Staff');
+const SchoolClass = require('../src/models/SchoolClass');
+const files = require('../src/services/mediaStorage');
+const platform = require('../src/tenancy/platform');
+const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a4l8AAAAASUVORK5CYII=', 'base64');
+let app, mongo, root, principal, parent, cashier, owner, pupil, klass, photo;
+const schoolId = new mongoose.Types.ObjectId(), branchId = new mongoose.Types.ObjectId(), otherBranch = new mongoose.Types.ObjectId();
+const auth = user => ({ Authorization: `Bearer ${jwt.sign({ id: String(user._id), role: user.role || 'owner', scope: user.role ? undefined : 'owner', version: 0 }, process.env.JWT_SECRET)}` });
+const upload = (module, user = principal, bytes = png, purpose = 'documents') => request(app).post(`/api/${module}/documents`).set(auth(user)).field('purpose', purpose).attach('document', bytes, 'file.png');
+before(async () => {
+  process.env.JWT_SECRET = 'media-tests-only';
+  root = await fs.mkdtemp(path.join(os.tmpdir(), 'schoolo-media-test-'));
+  process.env.MEDIA_STORAGE_ROOT = root;
+  process.env.MEDIA_LEGACY_ROOT = path.join(root, 'legacy-uploads');
+  mongo = await MongoMemoryReplSet.create({ binary: { version: '7.0.14' }, replSet: { count: 1 } });
+  await mongoose.connect(mongo.getUri('media'));
+  process.env.OWNER_DB_NAME = 'media-platform';
+  await platform.connect(mongo.getUri());
+  owner = await platform.get().Owner.create({ name: 'Owner', email: 'owner@media.test', passwordHash: 'unused' });
+  principal = await User.create({ name: 'Principal', email: 'principal@media.test', role: 'principal', passwordHash: 'unused' });
+  parent = await User.create({ name: 'Parent', email: 'parent@media.test', role: 'parent', passwordHash: 'unused' });
+  cashier = await User.create({ name: 'Cashier', email: 'cashier@media.test', role: 'staff', passwordHash: 'unused' });
+  await Staff.create({ name: 'Cashier', firstName: 'Cashier', department: 'Finance', phone: '9999999999', userId: cashier._id, permissions: ['fees'] });
+  klass = await SchoolClass.create({ name: '1st-A', grade: '1st', section: 'A', gradeBand: 'Primary' });
+  pupil = await Student.create({ name: 'Child', admissionNo: 'M1', classId: klass._id });
+  await User.updateOne({ _id: parent._id }, { childStudentIds: [pupil._id] });
+  app = express(); app.use(express.json());
+  app.use('/api/owner', require('../src/routes/ownerRoutes'));
+  app.use((req, res, next) => { req.tenant = { school: { _id: schoolId }, branch: { _id: req.get('x-test-branch') === 'other' ? otherBranch : branchId } }; next(); });
+  for (const module of ['students', 'teachers', 'staff', 'transport']) app.use(`/api/${module}`, require(`../src/routes/${module === 'teachers' ? 'teacher' : module === 'students' ? 'student' : module}Routes`));
+  app.use('/api/media', require('../src/routes/mediaRoutes'));
+  app.get('/api/legacy-media/:folder/:name', require('../src/routes/mediaRoutes').legacy);
+  app.use((e, req, res, next) => res.status(e.status || 500).json({ message: e.message }));
+});
+after(async () => {
+  await platform.close(); await mongoose.disconnect(); await mongo?.stop();
+  assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir()));
+  assert.ok(path.basename(root).startsWith('schoolo-media-test-'));
+  await fs.rm(root, { recursive: true, force: true });
+});
+test('multipart uploads save on server under authenticated school/branch, not in MongoDB', async () => {
+  const result = await upload('students', principal, png, 'photos').field('schoolId', String(new mongoose.Types.ObjectId())).expect(201);
+  photo = result.body;
+  const media = await Media.findById(photo.id).lean();
+  assert.equal(String(media.schoolId), String(schoolId));
+  assert.equal(String(media.branchId), String(branchId));
+  assert.ok(media.path.startsWith(`schools/${schoolId}/branches/${branchId}/students/photos/`));
+  assert.equal(media.bytes, undefined);
+  assert.deepEqual(await fs.readFile(files.absolute(media.path)), png);
+  assert.equal(photo.size, png.length);
+  const response = await request(app).get(photo.documentUrl).set(auth(principal)).expect(200);
+  assert.match(response.headers['content-type'], /image\/png/);
+  assert.match(response.headers['cache-control'], /no-store/);
+  await request(app).get(photo.documentUrl).expect(401);
+  await request(app).get(photo.documentUrl).set(auth(principal)).set('x-test-branch', 'other').expect(404);
+});
+test('API enforces 400 KB, validates actual content, prevents image/PDF confusion', async () => {
+  const beforeCount = await Media.countDocuments();
+  await upload('students', principal, Buffer.alloc(files.MAX_BYTES + 1)).expect(413);
+  await upload('students', principal, Buffer.from('<script>not an image</script>')).expect(400);
+  await upload('students', principal, Buffer.from('%PDF-1.4\n%%EOF'), 'photos').expect(400);
+  assert.equal(await Media.countDocuments(), beforeCount);
+  await upload('students', principal, Buffer.from('%PDF-1.4\n%%EOF')).expect(201);
+  await upload('students', cashier).expect(403);
+});
+test('attach checks tenant, and parent/fees access is restricted to student photos', async () => {
+  await request(app).get(photo.documentUrl).set(auth(parent)).expect(403);
+  await request(app).put(`/api/students/${pupil._id}`).set(auth(principal)).set('x-test-branch', 'other').send({ profileImageUrl: photo.documentUrl }).expect(400);
+  await request(app).put(`/api/students/${pupil._id}`).set(auth(principal)).send({ profileImageUrl: photo.documentUrl }).expect(200);
+  assert.equal((await Media.findById(photo.id)).status, 'attached');
+  await request(app).get(photo.documentUrl).set(auth(parent)).expect(200);
+  await request(app).get(photo.documentUrl).set(auth(cashier)).expect(200);
+  const document = (await upload('students').expect(201)).body;
+  await request(app).get(document.documentUrl).set(auth(parent)).expect(403);
+  await request(app).get(document.documentUrl).set(auth(cashier)).expect(403);
+});
+test('teacher, staff and transport files share secure server-backed storage', async () => {
+  for (const module of ['teachers', 'staff', 'transport']) {
+    const result = (await upload(module).expect(201)).body;
+    assert.equal((await Media.findById(result.id)).module, module);
+    await request(app).get(result.documentUrl).set(auth(parent)).expect(403);
+    await request(app).get(result.documentUrl).set(auth(principal)).expect(200);
+    if (module === 'transport') {
+      const response = await request(app).get(`/api/transport/documents/${result.id}`).set(auth(principal)).expect(200);
+      assert.match(response.headers['content-type'], /image/);
+      assert.equal(await require('../src/models/Transport').Document.countDocuments({ _id: result.id }), 0);
+    }
+  }
+});
+test('owner logos stage before creation and bind into the school folder', async () => {
+  const uploaded = (await request(app).post('/api/owner/upload-logo').set(auth(owner)).attach('logo', png, 'logo.png').expect(201)).body;
+  const school = await platform.get().School.create({ name: 'Media School', code: 'media', logoUrl: uploaded.logoUrl });
+  await require('../src/services/schoolLogoStorage').validate(uploaded.logoUrl, owner._id);
+  await require('../src/services/schoolLogoStorage').bind(school);
+  const media = await platform.get().Media.findById(uploaded.id);
+  assert.ok(media.path.startsWith(`schools/${school._id}/school/logos/`));
+  assert.equal(media.status, 'attached');
+  await request(app).get(uploaded.logoUrl).set(auth(owner)).expect(200);
+  await request(app).get(uploaded.logoUrl).set(auth(parent)).expect(403);
+});
+test('legacy files stay private; migration previews before changing records and keeps originals', async () => {
+  const oldPath = path.join(process.env.MEDIA_LEGACY_ROOT, 'student-documents', 'old-certificate.png');
+  await fs.mkdir(path.dirname(oldPath), { recursive: true }); await fs.writeFile(oldPath, png);
+  await Student.updateOne({ _id: pupil._id }, { birthCertificateUrl: '/uploads/student-documents/old-certificate.png' });
+  await request(app).get('/api/legacy-media/student-documents/old-certificate.png').set(auth(principal)).expect(200);
+  await request(app).get('/api/legacy-media/student-documents/old-certificate.png').set(auth(parent)).expect(403);
+  const maintenance = require('../src/services/mediaMaintenance');
+  const school = { _id: schoolId }, branch = { _id: branchId };
+  const before = await Media.countDocuments();
+  assert.equal(await maintenance.migrateBranch(school, branch, false), 1);
+  assert.equal(await Media.countDocuments(), before);
+  assert.equal(await maintenance.migrateBranch(school, branch, true), 1);
+  const updated = await Student.findById(pupil._id);
+  assert.match(updated.birthCertificateUrl, /^\/api\/media\//);
+  await fs.access(oldPath);
+  await request(app).get(updated.birthCertificateUrl).set(auth(principal)).expect(200);
+  assert.equal(await maintenance.migrateBranch(school, branch, true), 0);
+});
+test('cleanup removes abandoned files but preserves currently referenced images', async () => {
+  const stale = (await upload('students').expect(201)).body;
+  const oldDate = new Date(Date.now() - 72 * 3600000);
+  await Media.updateMany({}, { $set: { updatedAt: oldDate, createdAt: oldDate } }, { timestamps: false });
+  const beforePath = (await Media.findById(stale.id)).path;
+  await require('../src/services/mediaMaintenance').cleanupBranch(true);
+  assert.equal(await Media.findById(stale.id), null);
+  await assert.rejects(fs.access(files.absolute(beforePath)));
+  assert.ok(await Media.findById(photo.id));
+  await fs.access(files.absolute((await Media.findById(photo.id)).path));
+});

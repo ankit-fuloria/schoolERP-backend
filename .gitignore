@@ -3,3 +3,5 @@ node_modules/
 npm-debug.log
 .tenant-db.key
 .owner-initial-credentials.txt
+storage/
+uploads/

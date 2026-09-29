@@ -201,6 +201,7 @@ async function create(req, res) {
     action: "create",
     detail: redactSecrets(req.body),
   });
+  await require('../services/mediaStorage').attach(req, 'teachers', teacher);
   res.status(201).json(serializeTeacher(populated));
 }
 
@@ -233,6 +234,7 @@ async function update(req, res) {
     teacher.name = [teacher.firstName, teacher.middleName, teacher.lastName].filter(Boolean).join(" ").trim();
   }
   await teacher.save();
+  await require('../services/mediaStorage').attach(req, 'teachers', teacher);
 
   if (teacher.userId && status !== undefined) {
     await User.findByIdAndUpdate(teacher.userId, { active: status !== "inactive" });
@@ -277,14 +279,4 @@ async function disable(req, res) {
   res.json(serializeTeacher(teacher));
 }
 
-async function uploadTeacherDocument(req, res) {
-  if (!req.file) {
-    return res.status(400).json({ message: "A document file is required" });
-  }
-  res.status(201).json({
-    fileName: req.file.originalname,
-    documentUrl: `/uploads/teacher-documents/${req.file.filename}`,
-  });
-}
-
-module.exports = { list, create, update, disable, uploadTeacherDocument };
+module.exports = { list, create, update, disable };

@@ -7,8 +7,8 @@ const User = require('../models/User');
 
 function fail(status, message) { throw Object.assign(new Error(message), { status }); }
 async function checkSchool(school, branch) {
-  if (!school || !school.active || !branch || !branch.active || String(branch.schoolId) !== String(school._id)) fail(403, 'School or branch access is disabled');
-  if (await platform.get().Invoice.exists({ schoolId: school._id, status: 'unpaid', dueAt: { $lt: new Date() } })) fail(402, 'ERP access is suspended because a school bill is overdue. Please contact the school administrator.');
+  const status = await require('../services/ownerBilling').schoolStatus(school, branch);
+  if (status !== 'active') throw Object.assign(new Error(status === 'disabled' ? 'Contact the administrator to activate your ERP.' : 'A school payment is overdue. ERP access is suspended.'), { status: status === 'disabled' ? 403 : 402, code: status === 'disabled' ? 'SCHOOL_DISABLED' : 'BILLING_OVERDUE' });
 }
 async function runBranch(school, branch, task) {
   const lease = await acquire(branch);
@@ -20,19 +20,23 @@ async function loginBranch(school, body) {
   const { Branch, Principal } = platform.get();
   // Keep explicit branch selection compatible with older clients.
   if (body.branchCode) return Branch.findOne({ schoolId: school._id, code: String(body.branchCode).trim().toLowerCase() }).select('+encryptedUri');
-  const branches = await Branch.find({ schoolId: school._id, active: true }).sort({ isMain: -1, createdAt: 1, _id: 1 }).select('+encryptedUri');
-  await checkSchool(school, branches[0]);
+  const branches = await Branch.find({ schoolId: school._id }).sort({ isMain: -1, createdAt: 1, _id: 1 }).select('+encryptedUri');
   if (typeof body.email !== 'string' || typeof body.password !== 'string' || !body.email.trim() || !body.password) fail(400, 'Email/mobile and password are required');
   const identifier = body.email.trim();
-  if (await Principal.exists({ schoolId: school._id, email: identifier.toLowerCase() })) return branches[0];
-  for (const branch of branches) {
+  const principal = await Principal.findOne({ schoolId: school._id, email: identifier.toLowerCase() });
+  if (principal) {
+    if (!principal.active || !await bcrypt.compare(body.password, principal.passwordHash)) fail(401, 'Invalid email or password');
+    return branches[0];
+  }
+  await checkSchool(school, branches.find(b => b.active));
+  for (const branch of branches.filter(b => b.active)) {
     const matches = await runBranch(school, branch, async () => {
       const user = await User.findOne({ active: true, $or: [{ email: identifier.toLowerCase() }, { phone: identifier }] });
       return user && await bcrypt.compare(body.password, user.passwordHash);
     });
     if (matches) return branch;
   }
-  fail(401, 'Invalid email or password');
+  fail(401, 'Invalid email/phone number or password');
 }
 async function gate(req, res, next) {
   try {
@@ -56,17 +60,31 @@ async function gate(req, res, next) {
       }
       if (claims.principalId && !await Principal.exists({ _id: claims.principalId, schoolId: school?._id, active: true })) fail(403, 'Principal account is disabled');
     }
-    await checkSchool(school, branch);
+    const schoolAccess = await require('../services/ownerBilling').schoolStatus(school, branch);
+    let principalLogin = false;
+    if (req.path === '/auth/login' && req.method === 'POST' && school) {
+      const principal = await Principal.findOne({ schoolId: school._id, email: String(req.body.email || '').trim().toLowerCase(), active: true });
+      principalLogin = Boolean(principal && typeof req.body.password === 'string' && await bcrypt.compare(req.body.password, principal.passwordHash));
+    }
+    const principalBilling = claims?.role === 'principal' && req.method === 'GET' && req.path === '/dashboard/billing';
+    if (schoolAccess !== 'active' && !principalLogin && !principalBilling) {
+      const code = schoolAccess === 'disabled' ? 'SCHOOL_DISABLED' : 'BILLING_OVERDUE';
+      return res.status(schoolAccess === 'disabled' ? 403 : 402).json({ code, message: claims?.role === 'principal' ? (schoolAccess === 'disabled' ? 'Contact the administrator to activate your ERP.' : 'A school payment is overdue. ERP access is suspended.') : 'Something went wrong. Please try again later.' });
+    }
+    if (!school || !branch || String(branch.schoolId) !== String(school._id)) fail(403, 'Something went wrong. Please try again later.');
     const lease = await acquire(branch);
     let released = false;
     const release = () => { if (!released) { released = true; lease.release(); } };
     res.once('finish', release); res.once('close', release);
     await storage.run({ connection: lease.connection, school, branch }, async () => {
       if (claims && !await User.exists({ _id: claims.id, role: claims.role, active: true })) fail(401, 'Account is unavailable');
-      req.tenant = { school, branch };
+      req.tenant = { school, branch, schoolAccess };
       next();
     });
-  } catch (error) { next(error); }
+  } catch (error) {
+    if (['SCHOOL_DISABLED', 'BILLING_OVERDUE'].includes(error.code)) return res.status(error.status).json({ code: error.code, message: 'Something went wrong. Please try again later.' });
+    next(error);
+  }
 }
 async function principalUser(principal) {
   const existing = await User.findOne({ email: principal.email });

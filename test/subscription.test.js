@@ -50,20 +50,23 @@ test('multi-branch school requires one main branch and independent databases', a
   assert.match(response.body.message, /School code/);
   assert.equal(await platform.get().Mail.countDocuments(), 2);
 });
-test('concurrent workers create one bill and two notifications, with 15-day due date', async () => {
+test('workers never issue bills; owner-issued legacy invoices remain compatible', async () => {
   const now = new Date(`${today}T12:00:00+05:30`);
   await Promise.all([billing.generate(now), billing.generate(now)]);
   await billing.generate(now);
+  assert.equal(await platform.get().Invoice.countDocuments({ schoolId: school._id }), 0);
+  const dueDate = billing.istDate(new Date(now.getTime() + 15 * 86400000));
+  const raised = await call('post', `/owner/schools/${school._id}/invoices`, { amountMinor: 130000, description: 'Legacy maintenance', dueDate }).expect(201);
+  await platform.get().Invoice.updateOne({ _id: raised.body._id }, { billingDate: today });
   const invoices = await platform.get().Invoice.find({ schoolId: school._id });
   assert.equal(invoices.length, 1);
   const invoice = invoices[0];
   assert.equal(invoice.amountMinor, 130000);
-  assert.equal(invoice.maintenanceAmountMinor, 30000);
   assert.equal(invoice.dueDate, billing.istDate(new Date(now.getTime() + 15 * 86400000)));
   assert.equal(invoice.dueAt.toISOString(), new Date(`${invoice.dueDate}T23:59:59.999+05:30`).toISOString());
   assert.equal(await platform.get().Mail.countDocuments({ key: new RegExp(`^invoice:${invoice._id}:`) }), 2);
   const updated = await platform.get().School.findById(school._id);
-  assert.equal(updated.subscription.nextBillingDate, billing.nextDate(today, 'quarterly', today));
+  assert.equal(updated.subscription.nextBillingDate, today);
 });
 test('overdue and payment notifications are deduplicated; paused schools do not renew', async () => {
   const invoice = await platform.get().Invoice.findOne({ schoolId: school._id });
@@ -99,4 +102,5 @@ test('mail delivery retries failures without losing notifications or exposing SM
   assert.equal(await Mail.countDocuments({ sentAt: null }), 0);
   assert.ok(sent.some(m => m.to === 'owner@example.test'));
   assert.ok(sent.some(m => m.to === 'admin@example.test'));
+  assert.ok(sent.every(m => m.from.name === 'Lavener Holdings' && m.html.includes('Lavener Holdings') && m.attachments.length === 2));
 });

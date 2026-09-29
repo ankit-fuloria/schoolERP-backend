@@ -8,14 +8,17 @@ const Announcement = require("../models/Announcement");
 const ExamCycle = require("../models/ExamCycle");
 const LibraryBook = require("../models/LibraryBook");
 const TransportRoute = require("../models/TransportRoute");
-const HostelRoom = require("../models/HostelRoom");
 const timeAgo = require("../utils/timeAgo");
 const platform = require("../tenancy/platform");
+const Staff = require('../models/Staff');
 
 const GRADE_ORDER = ["Nursery - 5th", "6th - 8th", "9th - 10th", "11th - 12th"];
 const ACTIVE = { status: { $ne: "inactive" } };
 
 async function getPrincipalDashboard(req, res) {
+  const staff = req.user?.role === 'staff' ? await Staff.findOne({ userId: req.user.id }).select('permissions status') : null;
+  if (req.user?.role === 'staff' && (!staff || staff.status === 'inactive')) return res.status(403).json({ message: 'Staff account unavailable' });
+  const canRead = section => !staff || staff.permissions.includes(section) || staff.permissions.includes('reports');
   const [
     totalStudents,
     totalTeachers,
@@ -26,13 +29,13 @@ async function getPrincipalDashboard(req, res) {
     studentsByGradeAgg,
     topStudents,
   ] = await Promise.all([
-    Student.countDocuments(ACTIVE),
-    Teacher.countDocuments(ACTIVE),
-    SchoolClass.countDocuments(ACTIVE),
-    Attendance.find().sort({ date: 1 }),
-    Announcement.find(ACTIVE).sort({ createdAt: -1 }).limit(4),
-    FeeRecord.find({ isActive: { $ne: false } }),
-    Student.aggregate([
+    canRead('students') ? Student.countDocuments(ACTIVE) : 0,
+    canRead('teachers') ? Teacher.countDocuments(ACTIVE) : 0,
+    canRead('classes') ? SchoolClass.countDocuments(ACTIVE) : 0,
+    canRead('attendance') ? Attendance.find().sort({ date: 1 }) : [],
+    canRead('communications') ? Announcement.find(ACTIVE).sort({ createdAt: -1 }).limit(4) : [],
+    canRead('fees') ? FeeRecord.find({ isActive: { $ne: false } }) : [],
+    canRead('students') ? Student.aggregate([
       { $match: { status: { $ne: "inactive" } } },
       {
         $lookup: {
@@ -44,8 +47,8 @@ async function getPrincipalDashboard(req, res) {
       },
       { $unwind: "$class" },
       { $group: { _id: "$class.gradeBand", count: { $sum: 1 } } },
-    ]),
-    Student.find(ACTIVE).sort({ performancePercent: -1 }).limit(5).populate("classId", "name"),
+    ]) : [],
+    canRead('students') ? Student.find(ACTIVE).sort({ performancePercent: -1 }).limit(5).populate("classId", "name") : [],
   ]);
 
   const totalCollectionAmount = feeRecords
@@ -72,6 +75,7 @@ async function getPrincipalDashboard(req, res) {
   });
 
   res.json({
+    ...(staff ? { permissions: staff.permissions } : {}),
     stats: {
       totalStudents: { value: totalStudents, delta: "+28 this month" },
       totalTeachers: { value: totalTeachers, delta: "+5 this month" },
@@ -107,30 +111,29 @@ async function getPrincipalDashboard(req, res) {
     })),
     billingNotice: await (async () => {
       const schoolId = req.tenant?.school?._id;
-      if (!schoolId) return { hasUnpaid: false, activeInvoice: null };
+      if (!schoolId || staff) return { hasUnpaid: false, activeInvoice: null };
       try {
         const platformModels = platform.get();
         if (!platformModels?.Invoice) return { hasUnpaid: false, activeInvoice: null };
-        const unpaidInvoice = await platformModels.Invoice.findOne({
-          schoolId,
-          status: "unpaid",
-        }).sort({ dueAt: 1 });
-
-        const latestInvoice = unpaidInvoice || await platformModels.Invoice.findOne({
-          schoolId,
-        }).sort({ createdAt: -1 });
+        const ownerBilling = require('../services/ownerBilling');
+        const allInvoices = await platformModels.Invoice.find({ schoolId }).sort({ createdAt: -1 });
+        const pending = allInvoices.map(i => ownerBilling.view(i)).filter(i => i.outstandingMinor > 0)
+          .sort((a, b) => new Date(a.nextDueAt) - new Date(b.nextDueAt));
+        const unpaidInvoice = pending[0];
+        const latestInvoice = unpaidInvoice || allInvoices[0];
 
         if (!latestInvoice) return { hasUnpaid: false, activeInvoice: null };
 
         return {
           hasUnpaid: Boolean(unpaidInvoice),
+          summary: ownerBilling.summary(allInvoices),
           activeInvoice: {
             id: latestInvoice._id,
             number: latestInvoice.number,
             description: latestInvoice.description,
-            amount: (latestInvoice.amountMinor || 0) / 100,
-            dueDate: latestInvoice.dueDate,
-            dueAt: latestInvoice.dueAt,
+            amount: require('../services/ownerBilling').view(latestInvoice).nextDueMinor / 100,
+            dueDate: require('../services/ownerBilling').view(latestInvoice).nextDueDate || latestInvoice.dueDate,
+            dueAt: require('../services/ownerBilling').view(latestInvoice).nextDueAt || latestInvoice.dueAt,
             status: latestInvoice.status,
             cycle: latestInvoice.cycle,
             cycleAmount: (latestInvoice.cycleAmountMinor || 0) / 100,
@@ -152,7 +155,6 @@ async function getPrincipalReports(req, res) {
     teacherInactive,
     libraryBooks,
     transportRoutes,
-    hostelRooms,
     atRiskStudents,
     overdueFees,
     upcomingExamsCount,
@@ -164,7 +166,6 @@ async function getPrincipalReports(req, res) {
     Teacher.countDocuments({ status: "inactive" }),
     LibraryBook.find(ACTIVE),
     TransportRoute.find(ACTIVE),
-    HostelRoom.find(ACTIVE),
     Student.find({ status: { $ne: "inactive" } })
       .sort({ performancePercent: 1 })
       .limit(5)
@@ -214,18 +215,11 @@ async function getPrincipalReports(req, res) {
     totalCapacity: transportRoutes.reduce((sum, r) => sum + (r.capacity || 0), 0),
   };
 
-  const hostelStats = {
-    totalRooms: hostelRooms.length,
-    totalCapacity: hostelRooms.reduce((sum, r) => sum + (r.capacity || 0), 0),
-    totalOccupied: hostelRooms.reduce((sum, r) => sum + (r.occupied || 0), 0),
-  };
-
   res.json({
     studentStatus: { active: studentActive, inactive: studentInactive },
     teacherStatus: { active: teacherActive, inactive: teacherInactive },
     library: libraryStats,
     transport: transportStats,
-    hostel: hostelStats,
     upcomingExamsCount,
     atRiskStudents: atRiskStudents.map((s) => ({
       name: s.name,
@@ -252,11 +246,15 @@ async function getPrincipalBilling(req, res) {
   }
 
   const { Invoice, School } = platform.get();
-  const school = await School.findById(schoolId).select("name code subscription");
+  const school = await School.findById(schoolId).select("name code subscription pricing active");
+  const ledger = await require('../services/ownerBilling').ledger(schoolId);
   const invoices = await Invoice.find({ schoolId }).sort({ createdAt: -1 });
 
   res.json({
-    school: { name: school?.name, code: school?.code },
+    school: { name: school?.name, code: school?.code, active: school?.active },
+    schoolAccess: req.tenant.schoolAccess || 'active',
+    pricing: school?.pricing || null,
+    ledger,
     subscription: school?.subscription || null,
     invoices: invoices.map((inv) => ({
       id: inv._id,
@@ -278,4 +276,3 @@ async function getPrincipalBilling(req, res) {
 }
 
 module.exports = { getPrincipalDashboard, getPrincipalReports, getPrincipalBilling };
-

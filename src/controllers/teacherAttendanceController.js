@@ -2,12 +2,33 @@ const Teacher = require("../models/Teacher");
 const TeacherAttendance = require("../models/TeacherAttendance");
 const SchoolSettings = require("../models/SchoolSettings");
 
-function getTodayString() {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
+function getTodayString(date = new Date()) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
+}
+
+function getDayName(dateObj = new Date()) {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Kolkata",
+    weekday: "long",
+  }).format(dateObj);
+}
+
+function getISTParts(date = new Date()) {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Kolkata",
+    hour12: false,
+    hour: "numeric",
+    minute: "numeric",
+  });
+  const parts = formatter.formatToParts(date);
+  const hour = parseInt(parts.find((p) => p.type === "hour").value, 10);
+  const minute = parseInt(parts.find((p) => p.type === "minute").value, 10);
+  return { hour, minute };
 }
 
 function getDistanceFromLatLonInMeters(lat1, lon1, lat2, lon2) {
@@ -51,7 +72,7 @@ function isWorkingDay(settings, dateObj) {
   const workingDays = settings?.workingDays?.length > 0
     ? settings.workingDays
     : ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-  const dayName = DAY_NAMES[dateObj.getDay()];
+  const dayName = getDayName(dateObj);
   return workingDays.some((w) => w.toLowerCase() === dayName.toLowerCase());
 }
 
@@ -65,7 +86,7 @@ async function getCheckStatus(req, res) {
     const todayStr = getTodayString();
     const settings = (await SchoolSettings.findOne()) || {};
     const todayDate = new Date();
-    const dayName = DAY_NAMES[todayDate.getDay()];
+    const dayName = getDayName(todayDate);
     const working = isWorkingDay(settings, todayDate);
 
     const record = await TeacherAttendance.findOne({
@@ -117,9 +138,8 @@ async function getAttendanceLogs(req, res) {
       return res.status(403).json({ message: "No teacher profile found" });
     }
 
-    const now = new Date();
-    const requestedMonth = req.query.month ||
-      `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    const todayStr = getTodayString();
+    const requestedMonth = req.query.month || todayStr.slice(0, 7);
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(requestedMonth)) {
       return res.status(400).json({ message: "Month must use YYYY-MM format" });
     }
@@ -127,7 +147,8 @@ async function getAttendanceLogs(req, res) {
     const [year, month] = requestedMonth.split("-").map(Number);
     const monthStart = new Date(year, month - 1, 1);
     const monthEnd = new Date(year, month, 0);
-    const currentDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const [currY, currM, currD] = todayStr.split("-").map(Number);
+    const currentDay = new Date(currY, currM - 1, currD);
     const effectiveEnd = monthEnd < currentDay ? monthEnd : currentDay;
     const settings = (await SchoolSettings.findOne()) || {};
     const records = await TeacherAttendance.find({
@@ -142,7 +163,7 @@ async function getAttendanceLogs(req, res) {
 
     if (monthStart <= currentDay) {
       for (let day = 1; day <= effectiveEnd.getDate(); day += 1) {
-        const date = new Date(year, month - 1, day);
+        const date = new Date(year, month - 1, day, 12, 0, 0);
         if (!isWorkingDay(settings, date)) continue;
 
         const dateString = `${requestedMonth}-${String(day).padStart(2, "0")}`;
@@ -202,7 +223,7 @@ async function checkIn(req, res) {
     const salaryConfig = settings.salaryConfig || {};
 
     const checkInDate = time ? new Date(time) : new Date();
-    const dayName = DAY_NAMES[checkInDate.getDay()];
+    const dayName = getDayName(checkInDate);
     if (!isWorkingDay(settings, checkInDate)) {
       return res.status(400).json({
         message: `Check-in blocked: Today (${dayName}) is a non-working day according to school settings.`,
@@ -228,21 +249,22 @@ async function checkIn(req, res) {
       });
     }
 
-    // Check Late status based on schoolStartTime + lateGraceMinutes
+    // Check Late status based on schoolStartTime + lateGraceMinutes in Asia/Kolkata
     const startTimeStr = salaryConfig.schoolStartTime || "08:30"; // "HH:mm"
     const [startH, startM] = startTimeStr.split(":").map(Number);
     const graceM = salaryConfig.lateGraceMinutes || 10;
 
-    const deadline = new Date(checkInDate);
-    deadline.setHours(startH || 8, (startM || 30) + graceM, 0, 0);
+    const deadlineTotalMinutes = (startH || 8) * 60 + (startM || 30) + graceM;
+    const istParts = getISTParts(checkInDate);
+    const checkInTotalMinutes = istParts.hour * 60 + istParts.minute;
 
     let status = "present";
     let lateMinutes = 0;
     let deductionAmount = 0;
 
-    if (checkInDate > deadline) {
+    if (checkInTotalMinutes > deadlineTotalMinutes) {
       status = "late";
-      lateMinutes = Math.round((checkInDate - deadline) / (1000 * 60));
+      lateMinutes = checkInTotalMinutes - deadlineTotalMinutes;
 
       const monthStart = `${todayStr.slice(0, 7)}-01`;
       const previousLateDays = await TeacherAttendance.countDocuments({
@@ -309,7 +331,7 @@ async function checkOut(req, res) {
     const salaryConfig = settings.salaryConfig || {};
 
     const checkOutDate = time ? new Date(time) : new Date();
-    const dayName = DAY_NAMES[checkOutDate.getDay()];
+    const dayName = getDayName(checkOutDate);
     if (!isWorkingDay(settings, checkOutDate)) {
       return res.status(400).json({
         message: `Check-out blocked: Today (${dayName}) is a non-working day according to school settings.`,

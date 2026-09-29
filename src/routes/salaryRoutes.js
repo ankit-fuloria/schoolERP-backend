@@ -1,9 +1,9 @@
 const express = require("express");
 const router = express.Router();
-const { requireAuth, requireRole } = require("../middleware/auth");
+const { requireAuth, requireRole, requirePermission } = require("../middleware/auth");
 const salaryController = require("../controllers/salaryController");
 
-router.use(requireAuth);
+router.use(requireAuth, requireRole('principal', 'staff'), requirePermission('fees'));
 
 router.get("/config", salaryController.getConfig);
 router.put("/config", requireRole("principal", "admin"), salaryController.updateConfig);

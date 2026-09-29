@@ -49,11 +49,11 @@ test('owner exclusively creates schools, branches and encrypted database assignm
   branchA = await platform.get().Branch.findOne({ schoolId: school._id }).select('+encryptedUri +databaseKey');
   assert.equal(databases.decrypt(branchA.encryptedUri), payload.mongoUri);
   assert.ok(!branchA.encryptedUri.includes('mongodb'));
-  branchB = (await call('post', `/api/owner/schools/${school._id}/branches`, { name: 'South', code: 'south', mongoUri: mongo.getUri('oak_south') }).expect(201)).body;
+  branchB = (await call('post', `/api/owner/schools/${school._id}/branches`, { name: 'South', code: 'south', mongoUri: mongo.getUri('oak_south') }).expect(res => assert.equal(res.status, 201, JSON.stringify(res.body)))).body;
   await call('post', `/api/owner/schools/${school._id}/branches`, { name: 'Duplicate', code: 'duplicate', mongoUri: payload.mongoUri }).expect(409);
   await call('post', `/api/owner/schools/${school._id}/branches`, { name: 'Alias', code: 'alias', mongoUri: payload.mongoUri.replace('127.0.0.1', 'localhost') }).expect(409);
   await call('post', `/api/owner/schools/${school._id}/branches`, { name: 'Control', code: 'control', mongoUri: mongo.getUri('schoolo_platform_test') }).expect(409);
-  const response = await call('get', '/api/owner/schools').expect(200);
+  const response = await call('get', '/api/owner/schools').expect(res => assert.equal(res.status, 200, JSON.stringify(res.body)));
   assert.ok(!JSON.stringify(response.body).includes('encryptedUri'));
   assert.ok(!JSON.stringify(response.body).includes('databaseKey'));
   assert.ok(!JSON.stringify(response.body).includes('mongodb'));
@@ -111,13 +111,13 @@ test('school login resolves branches without a branch code and stays inside the 
   const repeated = await call('post', '/api/auth/login', { schoolCode: 'oak', email: 'teacher@test.com', password }, null).expect(200);
   assert.equal((await call('get', '/api/probe', undefined, repeated.body.token).expect(200)).body.database, 'oak_north');
 });
-test('overdue bills block login AND existing tokens on all branches until settled', async () => {
+test('overdue bills restrict principal logins to billing and block operational requests', async () => {
   const invoice = (await call('post', `/api/owner/schools/${school._id}/invoices`, { description: 'Annual ERP subscription', amountMinor: 100000, dueDate: '2020-01-01' }).expect(201)).body;
   await call('get', '/api/probe', undefined, principalToken).expect(402);
-  await call('post', '/api/auth/login', { schoolCode: 'oak', email: 'principal@oak.test', password }, null).expect(402);
-  await call('post', '/api/auth/login', { schoolCode: 'oak', branchCode: 'south', email: 'principal@oak.test', password }, null).expect(402);
+  assert.equal((await call('post', '/api/auth/login', { schoolCode: 'oak', email: 'principal@oak.test', password }, null).expect(200)).body.user.schoolAccess, 'overdue');
+  assert.equal((await call('post', '/api/auth/login', { schoolCode: 'oak', branchCode: 'south', email: 'principal@oak.test', password }, null).expect(200)).body.user.schoolAccess, 'overdue');
   await call('get', '/api/owner/schools').expect(200);
-  await call('patch', `/api/owner/schools/${school._id}/invoices/${invoice._id}`, { status: 'paid', paymentReference: 'TEST-RECEIPT' }).expect(200);
+  await call('patch', `/api/owner/schools/${school._id}/invoices/${invoice._id}`, { status: 'paid', paymentReference: 'TEST-RECEIPT' }).expect(res => assert.equal(res.status, 200, JSON.stringify(res.body)));
   await call('get', '/api/probe', undefined, principalToken).expect(200);
   await call('patch', `/api/owner/schools/${school._id}/invoices/${invoice._id}`, { status: 'void', paymentReference: 'Invalid retry' }).expect(409);
 });

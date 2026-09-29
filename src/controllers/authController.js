@@ -15,12 +15,12 @@ async function login(req, res) {
     $or: [{ email: identifier.toLowerCase() }, { phone: identifier }],
   });
   if (!user) {
-    return res.status(401).json({ message: "Invalid email or password" });
+    return res.status(401).json({ message: "Invalid email/phone number or password" });
   }
 
   const isMatch = await bcrypt.compare(password, user.passwordHash);
   if (!isMatch) {
-    return res.status(401).json({ message: "Invalid email or password" });
+    return res.status(401).json({ message: "Invalid email/phone number or password" });
   }
 
   if (user.active === false) {
@@ -46,6 +46,7 @@ async function login(req, res) {
       email: user.email,
       role: user.role,
       phone: user.phone,
+      schoolAccess: req.tenant?.schoolAccess || 'active',
       ...(department !== undefined ? { department } : {}),
       ...(permissions !== undefined ? { permissions } : {}),
     },

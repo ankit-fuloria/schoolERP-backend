@@ -1,10 +1,11 @@
 const express = require('express');
+const ownerBilling = require('../services/ownerBilling');
+const ownerFinance = require('../services/ownerFinance');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('node:crypto');
-const path = require('node:path');
-const fs = require('node:fs');
-const multer = require('multer');
+const files = require('../services/mediaStorage');
+const logos = require('../services/schoolLogoStorage');
 const platform = require('../tenancy/platform');
 const databases = require('../tenancy/connections');
 const billing = require('../tenancy/billing');
@@ -12,28 +13,6 @@ const { fail } = require('../tenancy/access');
 const router = express.Router();
 const wrap = fn => (req, res, next) => Promise.resolve(fn(req, res)).catch(next);
 
-const logoUploadDir = path.join(__dirname, '../../uploads/school-logos');
-fs.mkdirSync(logoUploadDir, { recursive: true });
-
-const logoStorage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, logoUploadDir),
-  filename: (req, file, cb) => {
-    const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '-');
-    cb(null, `${Date.now()}-${safeName}`);
-  },
-});
-
-const logoUpload = multer({
-  storage: logoStorage,
-  limits: { fileSize: 5 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    if (file.mimetype.startsWith('image/')) {
-      cb(null, true);
-    } else {
-      cb(new Error('Only image files are allowed for school logos'));
-    }
-  },
-});
 const text = (value, label, max = 200) => {
   if (typeof value !== 'string' || !value.trim() || value.length > max) fail(400, `${label} is required (maximum ${max} characters)`);
   return value.trim();
@@ -80,12 +59,20 @@ router.use(async (req, res, next) => {
     req.owner = claims; next();
   } catch (error) { next(error); }
 });
-router.post('/upload-logo', logoUpload.single('logo'), wrap(async (req, res) => {
-  if (!req.file) fail(400, 'Logo image file is required');
-  res.status(201).json({
-    fileName: req.file.originalname,
-    logoUrl: `/uploads/school-logos/${req.file.filename}`,
-  });
+router.post('/upload-logo', files.upload('logo'), wrap(async (req, res) => {
+  const media = await files.save({ Model: platform.get().Media, module: 'logos', purpose: 'logos', uploadedBy: req.owner.id,
+    bytes: req.file?.buffer, originalName: req.file?.originalname || 'logo' });
+  res.status(201).json({ id: media._id, logoUrl: files.url(media, true), size: media.size });
+}));
+router.get('/media/:id', wrap(async (req, res) => {
+  if (!/^[a-f\d]{24}$/i.test(req.params.id)) fail(400, 'Invalid media ID');
+  const media = await platform.get().Media.findOne({ _id: req.params.id, module: 'logos' });
+  if (!media) fail(404, 'Logo not found');
+  await files.send(res, media);
+}));
+router.get('/legacy-media/:name', wrap(async (req, res) => {
+  if (!await platform.get().School.exists({ logoUrl: `/uploads/school-logos/${req.params.name}` })) fail(404, 'Logo not found');
+  await require('../services/legacyMedia').sendLegacy(res, 'school-logos', req.params.name);
 }));
 router.put('/password', wrap(async (req, res) => {
   const owner = await platform.get().Owner.findById(req.owner.id);
@@ -95,15 +82,41 @@ router.put('/password', wrap(async (req, res) => {
   await owner.save(); res.json({ message: 'Password updated' });
 }));
 router.get('/invoices', wrap(async (req, res) => {
-  res.json(await platform.get().Invoice.find().populate('schoolId', 'name code').sort({ createdAt: -1 }));
+  res.json((await platform.get().Invoice.find().populate('schoolId', 'name code').sort({ createdAt: -1 })).map(i => ownerBilling.view(i)));
+}));
+router.get('/payment-settings', wrap(async (req, res) => res.json(await ownerBilling.settings())));
+router.get('/expenses', wrap(async (req, res) => res.json(await ownerFinance.expenses(req.query))));
+router.post('/expenses', wrap(async (req, res) => res.status(201).json(await ownerFinance.recordExpense(req.body, req.owner.id))));
+router.patch('/expenses/:id/void', wrap(async (req, res) => res.json(await ownerFinance.voidExpense(req.params.id, req.body.reason, req.owner.id))));
+router.get('/finance-report', wrap(async (req, res) => res.json(await ownerFinance.report(req.query))));
+router.get('/completed-invoices', wrap(async (req, res) => res.json(await platform.get().CompletedInvoice.find().sort({ issuedAt: -1 }).lean())));
+router.put('/payment-settings', wrap(async (req, res) => res.json(await ownerBilling.saveSettings(req.body, req.owner.id))));
+router.get('/billing-reminders', wrap(async (req, res) => res.json(await ownerBilling.reminders())));
+router.get('/schools/:id/payments', wrap(async (req, res) => res.json(await ownerBilling.ledger(req.params.id))));
+router.put('/schools/:id/pricing', wrap(async (req, res) => {
+  const plan = await ownerBilling.pricing(req.body);
+  const session = await platform.connection().startSession();
+  let school;
+  try { await session.withTransaction(async () => {
+    const existing = await platform.get().School.findById(req.params.id).session(session);
+    if (!existing) fail(404, 'School not found');
+    if (await platform.get().Invoice.exists({ schoolId: existing._id, kind: { $in: ['erp', 'maintenance'] } }).session(session)) fail(409, 'An invoiced payment plan cannot be changed');
+    existing.pricing = plan; await existing.save({ session }); school = existing;
+  }); } finally { await session.endSession(); }
+  res.json(school);
+}));
+router.post('/schools/:id/invoices/:invoiceId/payments', wrap(async (req, res) => {
+  res.status(201).json(await ownerBilling.recordPayment(req.params.id, req.params.invoiceId, req.body, req.owner.id));
 }));
 router.get('/schools', wrap(async (req, res) => {
   const { School, Branch, Invoice } = platform.get();
   const schools = await School.find().sort({ createdAt: -1 }).lean();
   const branches = await Branch.find().lean();
-  const overdue = await Invoice.distinct('schoolId', { status: 'unpaid', dueAt: { $lt: new Date() } });
-  const blocked = new Set(overdue.map(String));
-  res.json(schools.map(s => ({ ...s, overdue: blocked.has(String(s._id)), branches: branches.filter(b => String(b.schoolId) === String(s._id)) })));
+  const invoices = (await Invoice.find()).map(i => ownerBilling.view(i));
+  res.json(schools.map(s => {
+    const bills = invoices.filter(i => String(i.schoolId) === String(s._id));
+    return { ...s, overdue: bills.some(i => i.overdue), billingSummary: ownerBilling.summary(bills), branches: branches.filter(b => String(b.schoolId) === String(s._id)) };
+  }));
 }));
 async function databaseKey(uri) {
   if (typeof uri !== 'string' || uri.length > 4096) fail(400, 'MongoDB URL is required');
@@ -138,21 +151,25 @@ router.post('/schools', wrap(async (req, res) => {
     branches.push({ name, code: branchCode, isMain: input.isMain, databaseKey: key, encryptedUri: databases.encrypt(uri) });
   }
   const subscription = b.subscription ? billing.subscription(b.subscription, req.owner.id) : undefined;
+  const pricing = b.pricing ? await ownerBilling.pricing(b.pricing) : undefined;
   const principalName = text(b.principalName, 'Principal name');
   const email = text(b.principalEmail, 'Principal email').toLowerCase();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) fail(400, 'Enter a valid principal email');
   if (typeof b.principalPassword !== 'string' || b.principalPassword.length < 12 || b.principalPassword.length > 72) fail(400, 'Principal password must contain 12 to 72 characters');
   const passwordHash = await bcrypt.hash(b.principalPassword, 12);
   const logoUrl = (typeof b.logoUrl === 'string' && b.logoUrl.trim()) ? b.logoUrl.trim() : '';
+  await logos.validate(logoUrl, req.owner.id);
   const session = await platform.connection().startSession();
   let school;
   try { await session.withTransaction(async () => {
-    [school] = await School.create([{ name, code: schoolCode, logoUrl, subscription }], { session });
+    [school] = await School.create([{ name, code: schoolCode, logoUrl, subscription, pricing }], { session });
+    await logos.reserve(logoUrl, school._id, session);
     await Branch.create(branches.map(branch => ({ ...branch, schoolId: school._id })), { session, ordered: true });
     await Principal.create([{ schoolId: school._id, name: principalName, email, passwordHash }], { session });
     await billing.notify(school, `school:${school._id}`, `${name}: school subscription created`,
-      `School ${name} (${schoolCode}) has been created with ${branches.length} branches.\n${subscription ? `Cycle: ${subscription.cycle}\nCycle price: INR ${subscription.cycleAmountMinor / 100}\nMonthly maintenance: INR ${subscription.monthlyMaintenanceMinor / 100}\nFirst bill: ${subscription.firstBillingDate}\nBills are due 15 days after generation.` : 'Subscription billing has not been configured.'}`, session);
+      `School ${name} (${schoolCode}) has been created with ${branches.length} branches.\n${pricing ? `ERP cost after discount: INR ${(pricing.erpNetMinor / 100).toFixed(2)}\nMaintenance cycle: ${pricing.cycle}\nMonthly maintenance: INR ${(pricing.monthlyMaintenanceMinor / 100).toFixed(2)}\nFree maintenance months: ${pricing.freeMonths}\nFirst maintenance period: ${pricing.firstMaintenanceDate}` : 'Payment plan has not been configured.'}\nInvoices will be issued separately by Lavener Holdings.`, session);
   }); } finally { await session.endSession(); }
+  await logos.bind(school);
   res.status(201).json(school);
 }));
 router.put('/schools/:id/subscription', wrap(async (req, res) => {
@@ -174,9 +191,17 @@ router.patch('/schools/:id', wrap(async (req, res) => {
   const update = {};
   if (req.body.name !== undefined) update.name = text(req.body.name, 'School name');
   if (req.body.logoUrl !== undefined) update.logoUrl = typeof req.body.logoUrl === 'string' ? req.body.logoUrl.trim() : '';
+  if (update.logoUrl) await logos.validate(update.logoUrl, req.owner.id, req.params.id);
   if (req.body.active !== undefined) { if (typeof req.body.active !== 'boolean') fail(400, 'Invalid active status'); update.active = req.body.active; }
-  const school = await platform.get().School.findByIdAndUpdate(req.params.id, { $set: update }, { new: true, runValidators: true });
-  if (!school) fail(404, 'School not found'); res.json(school);
+  let school;
+  const session = await platform.connection().startSession();
+  try { await session.withTransaction(async () => {
+    school = await platform.get().School.findByIdAndUpdate(req.params.id, { $set: update }, { new: true, runValidators: true, session });
+    if (!school) fail(404, 'School not found');
+    if (update.logoUrl) await logos.reserve(update.logoUrl, school._id, session);
+  }); } finally { await session.endSession(); }
+  await logos.bind(school);
+  res.json(school);
 }));
 router.post('/schools/:id/branches', wrap(async (req, res) => {
   const { School, Branch } = platform.get();
@@ -198,7 +223,7 @@ router.patch('/schools/:id/branches/:branchId', wrap(async (req, res) => {
   if (!branch) fail(404, 'Branch not found'); res.json(branch);
 }));
 router.get('/schools/:id/invoices', wrap(async (req, res) => {
-  res.json(await platform.get().Invoice.find({ schoolId: req.params.id }).sort({ createdAt: -1 }));
+  res.json((await platform.get().Invoice.find({ schoolId: req.params.id }).sort({ createdAt: -1 })).map(i => ownerBilling.view(i)));
 }));
 function dueAt(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) fail(400, 'Due date must be YYYY-MM-DD');
@@ -207,15 +232,17 @@ function dueAt(value) {
   return new Date(`${value}T23:59:59.999+05:30`);
 }
 router.post('/schools/:id/invoices', wrap(async (req, res) => {
+  if (req.body.kind) return res.status(201).json(await ownerBilling.issue(req.params.id, req.body, req.owner.id));
   const school = await platform.get().School.findById(req.params.id);
   if (!school) fail(404, 'School not found');
+  if (school.pricing?.cycle) fail(400, 'Choose ERP setup or maintenance for this school invoice');
   const { amountMinor, description, dueDate } = req.body;
   if (!Number.isSafeInteger(amountMinor) || amountMinor < 1 || amountMinor > 100000000000) fail(400, 'Enter a valid positive amount in paise');
   const session = await platform.connection().startSession();
   let invoice;
   try { await session.withTransaction(async () => {
   [invoice] = await platform.get().Invoice.create([{ schoolId: req.params.id,
-    number: `INV-${Date.now()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`,
+    number: `BILL-${Date.now()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`, documentType: 'bill',
     amountMinor, description: text(description, 'Description', 1000), dueDate, dueAt: dueAt(dueDate), createdBy: req.owner.id, updatedBy: req.owner.id }], { session });
   await billing.invoiceNotice(school, invoice, session);
   }); } finally { await session.endSession(); }
@@ -227,11 +254,14 @@ router.patch('/schools/:id/invoices/:invoiceId', wrap(async (req, res) => {
   const session = await platform.connection().startSession();
   let invoice;
   try { await session.withTransaction(async () => {
+    const current = await platform.get().Invoice.findOne({ _id: req.params.invoiceId, schoolId: req.params.id }).session(session);
+    if (current?.kind !== 'legacy' && current?.kind && (req.body.status !== 'void' || ownerBilling.view(current).paidMinor > 0)) fail(409, 'Record individual payments; invoices with payments cannot be cancelled');
     invoice = await platform.get().Invoice.findOneAndUpdate({ _id: req.params.invoiceId, schoolId: req.params.id, status: 'unpaid' },
       { $set: { status: req.body.status, paymentReference, paidAt: req.body.status === 'paid' ? new Date() : null, updatedBy: req.owner.id } }, { new: true, session });
     if (!invoice) fail(409, 'Invoice not found or already settled');
     const school = await platform.get().School.findById(req.params.id).session(session);
     await billing.invoiceNotice(school, invoice, session);
+    await ownerFinance.complete(invoice, school, req.owner.id, session);
   }); } finally { await session.endSession(); }
   res.json(invoice);
 }));

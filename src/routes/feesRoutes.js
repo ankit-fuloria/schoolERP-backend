@@ -16,6 +16,8 @@ const { getFeeStructure, updateFeeStructure } = require("../controllers/feeStruc
 const router = express.Router();
 
 router.use(requireAuth, requireRole("principal", "staff"), requirePermission("fees"));
+router.get('/classes', asyncHandler(require('../controllers/feeLookupController').classes));
+router.get('/students', asyncHandler(require('../controllers/feeLookupController').students));
 
 router.get("/structure", asyncHandler(getFeeStructure));
 router.get('/charge-status', asyncHandler(require('../controllers/additionalChargesController').status));

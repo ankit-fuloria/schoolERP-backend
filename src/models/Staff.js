@@ -36,7 +36,6 @@ const PERMISSION_KEYS = [
   "timetable",
   "library",
   "transport",
-  "hostel",
   "communications",
   "reports",
   "settings",

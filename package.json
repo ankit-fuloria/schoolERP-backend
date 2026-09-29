@@ -1,7 +1,7 @@
 {
   "name": "schoolo-backend",
   "version": "1.0.0",
-  "description": "Schoolo ERP backend API",
+  "description": "School Setu | Part of Lavener backend API",
   "main": "src/server.js",
   "scripts": {
     "test": "node --test test/*.test.js",
