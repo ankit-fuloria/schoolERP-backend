@@ -6,6 +6,7 @@ const User = require('../models/User');
 const Staff = require('../models/Staff');
 const Teacher = require('../models/Teacher');
 const { Driver } = require('../models/Transport');
+const accountPhone = require('../utils/accountPhone');
 
 const roles = ['principal', 'teacher', 'staff', 'parent', 'driver'];
 const id = value => mongoose.isValidObjectId(value) && /^[a-f\d]{24}$/i.test(value);
@@ -20,13 +21,7 @@ function email(value) {
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(result)) fail(400, 'Enter a valid email address');
   return result;
 }
-function phone(value, required) {
-  const result = compact(value);
-  if (required && !result) fail(400, 'Phone is required for this account');
-  if (result && !/^\+?[0-9]{7,15}$/.test(result)) fail(400, 'Phone must contain 7-15 digits');
-  return result;
-}
-function changes(input, role) {
+function changes(input) {
   if (!input || Array.isArray(input) || typeof input !== 'object' ||
       !Object.keys(input).length || Object.keys(input).some(key => !['name', 'email', 'phone', 'active'].includes(key))) {
     fail(400, 'Only name, email, phone and active status can be changed here');
@@ -34,7 +29,7 @@ function changes(input, role) {
   const value = {};
   if (input.name !== undefined) value.name = name(input.name, 'Name');
   if (input.email !== undefined) value.email = email(input.email);
-  if (input.phone !== undefined) value.phone = phone(input.phone, ['teacher', 'staff', 'driver'].includes(role));
+  if (input.phone !== undefined) value.phone = accountPhone.required(input.phone);
   if (input.active !== undefined) {
     if (typeof input.active !== 'boolean') fail(400, 'Active status must be true or false');
     value.active = input.active;
@@ -107,9 +102,9 @@ async function updateBranch(schoolId, branchId, userId, input) {
     try { await session.withTransaction(async () => {
       const user = await User.findById(userId).session(session);
       if (!user || user.role === 'principal') fail(404, 'User not found in this branch');
-      const patch = changes(input, user.role);
+      const patch = changes(input);
       const nextPhone = patch.phone ?? user.phone;
-      if (nextPhone && patch.phone !== undefined && await User.exists({ _id: { $ne: user._id }, phone: nextPhone }).session(session)) fail(409, 'Phone is already used in this branch');
+      if (nextPhone && patch.phone !== undefined && await User.exists({ _id: { $ne: user._id }, phone: accountPhone.pattern(nextPhone) }).session(session)) fail(409, 'Phone is already used in this branch');
       Object.assign(user, patch);
       await user.save({ session });
       const Profile = user.role === 'staff' ? Staff : user.role === 'teacher' ? Teacher : user.role === 'driver' ? Driver : null;
@@ -134,7 +129,7 @@ async function updateBranch(schoolId, branchId, userId, input) {
 async function updatePrincipal(schoolId, principalId, input) {
   const { school, branches } = await schoolAndBranches(schoolId);
   if (!id(principalId)) fail(400, 'Invalid principal ID');
-  const patch = changes(input, 'principal');
+  const patch = changes(input);
   const { Principal } = platform.get();
   const principal = await Principal.findOne({ _id: principalId, schoolId: school._id });
   if (!principal) fail(404, 'Principal not found in this school');
@@ -145,6 +140,8 @@ async function updatePrincipal(schoolId, principalId, input) {
       if (conflict) fail(409, `Email is already used in ${branch.name}`);
     }
   }
+  if (patch.phone !== undefined && patch.phone !== principal.phone &&
+      await Principal.exists({ schoolId: school._id, phone: accountPhone.pattern(patch.phone), _id: { $ne: principal._id } })) fail(409, 'Phone is already used by another principal');
   Object.assign(principal, patch);
   await principal.save();
   return publicUser(principal, null);

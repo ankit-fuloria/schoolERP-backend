@@ -3,6 +3,7 @@ const Teacher = require("../models/Teacher");
 const User = require("../models/User");
 const Subject = require("../models/Subject");
 const { logAction, redactSecrets } = require("../utils/auditLog");
+const accountPhone = require('../utils/accountPhone');
 
 const DETAIL_FIELDS = [
   "firstName", "middleName", "lastName", "dateOfBirth", "gender", "bloodGroup",
@@ -132,11 +133,13 @@ async function create(req, res) {
     assignments,
   } = req.body;
   const name = [firstName, middleName, lastName].filter(Boolean).join(" ").trim();
-  if (!firstName || !subject || !email || !phone || !password) {
+  if (typeof firstName !== 'string' || !firstName.trim() || !subject || !email || !phone || !password) {
     return res.status(400).json({
       message: "first name, subject, phone, email and password are required",
     });
   }
+  if (typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) return res.status(400).json({ message: 'Enter a valid email address' });
+  const contactPhone = accountPhone.required(phone);
 
   let validAssignments;
   try {
@@ -146,7 +149,7 @@ async function create(req, res) {
   }
 
   const existing = await User.findOne({
-    $or: [{ email: email.toLowerCase() }, { phone }],
+    $or: [{ email: email.trim().toLowerCase() }, { phone: accountPhone.pattern(contactPhone) }],
   });
   if (existing) {
     return res.status(400).json({ message: "That email or phone number is already in use" });
@@ -154,8 +157,8 @@ async function create(req, res) {
   const passwordHash = await bcrypt.hash(password, 10);
   const user = await User.create({
     name,
-    email: email.toLowerCase(),
-    phone,
+    email: email.trim().toLowerCase(),
+    phone: contactPhone,
     passwordHash,
     role: "teacher",
   });
@@ -172,7 +175,7 @@ async function create(req, res) {
     disabilityType: req.body.hasDisability === true ? req.body.disabilityType : undefined,
     disabilityDocumentUrl:
       req.body.hasDisability === true ? req.body.disabilityDocumentUrl : undefined,
-    phone,
+    phone: contactPhone,
     emergencyContact: req.body.emergencyContact,
     idProofType: req.body.idProofType,
     idProofDocumentUrl: req.body.idProofDocumentUrl,
@@ -184,7 +187,7 @@ async function create(req, res) {
     otherDocumentUrl: req.body.otherDocumentUrl,
     subject,
     classAssigned,
-    email: email.toLowerCase(),
+    email: email.trim().toLowerCase(),
     userId: user._id,
     assignments: validAssignments,
     ...detailValues(req.body),
@@ -211,7 +214,7 @@ async function update(req, res) {
     return res.status(404).json({ message: "Teacher not found" });
   }
 
-  const { name, subject, classAssigned, assignments, status } = req.body;
+  const { name, subject, classAssigned, assignments, status, email, phone, password } = req.body;
   let validAssignments;
   if (assignments !== undefined) {
     try {
@@ -225,6 +228,8 @@ async function update(req, res) {
   if (classAssigned !== undefined) teacher.classAssigned = classAssigned;
   if (validAssignments !== undefined) teacher.assignments = validAssignments;
   if (status !== undefined) teacher.status = status;
+  if (email !== undefined && email.trim()) teacher.email = email.trim().toLowerCase();
+  if (phone !== undefined && phone.trim()) teacher.phone = accountPhone.required(phone);
   Object.assign(teacher, detailValues(req.body));
   if (req.body.hasDisability === false) {
     teacher.disabilityType = undefined;
@@ -240,11 +245,15 @@ async function update(req, res) {
     await User.findByIdAndUpdate(teacher.userId, { active: status !== "inactive" });
   }
   if (teacher.userId) {
-    await User.findByIdAndUpdate(teacher.userId, {
+    const userUpdates = {
       name: teacher.name,
       email: teacher.email,
       phone: teacher.phone,
-    });
+    };
+    if (password && password.trim()) {
+      userUpdates.passwordHash = await bcrypt.hash(password.trim(), 10);
+    }
+    await User.findByIdAndUpdate(teacher.userId, userUpdates);
   }
 
   const populated = await Teacher.findById(teacher._id).populate(

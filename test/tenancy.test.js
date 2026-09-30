@@ -34,6 +34,8 @@ before(async () => {
   app.post('/api/auth/login', require('../src/routes/ownerRoutes').sharedLogin);
   app.use('/api', gate);
   app.use('/api/auth', require('../src/routes/authRoutes'));
+  app.use('/api/parents', require('../src/routes/parentRoutes'));
+  app.use('/api/teachers', require('../src/routes/teacherRoutes'));
   app.use('/api/branches', require('../src/routes/branchAccessRoutes'));
   app.get('/api/probe', async (req, res, next) => {
     try { await new Promise(r => setTimeout(r, Math.random() * 20)); res.json({ users: await User.find().select('name email role'), database: connection().name }); }
@@ -45,8 +47,11 @@ before(async () => {
 after(async () => { await databases.close(); await platform.close(); await mongoose.disconnect(); if (mongo) await mongo.stop(); });
 test('owner exclusively creates schools, branches and encrypted database assignments', async () => {
   await call('get', '/api/owner/schools', undefined, null).expect(401);
-  const payload = { name: 'Oak School', code: 'oak', branchName: 'North', branchCode: 'north', mongoUri: mongo.getUri('oak_north'), principalName: 'Principal', principalEmail: 'principal@oak.test', principalPassword: password };
+  const payload = { name: 'Oak School', code: 'oak', branchName: 'North', branchCode: 'north', mongoUri: mongo.getUri('oak_north'), principalName: 'Principal', principalEmail: 'principal@oak.test', principalPhone: '9876543210', principalPassword: password };
   school = (await call('post', '/api/owner/schools', payload).expect(201)).body;
+  assert.equal(school.code, 'OAK');
+  await call('post', '/api/owner/schools', { name: 'Duplicate School', code: 'OaK' }).expect(409);
+  await call('post', '/api/owner/schools', { name: 'Legacy Duplicate', code: 'LEGACY' }).expect(409);
   branchA = await platform.get().Branch.findOne({ schoolId: school._id }).select('+encryptedUri +databaseKey');
   assert.equal(databases.decrypt(branchA.encryptedUri), payload.mongoUri);
   assert.ok(!branchA.encryptedUri.includes('mongodb'));
@@ -60,12 +65,16 @@ test('owner exclusively creates schools, branches and encrypted database assignm
   assert.ok(!JSON.stringify(response.body).includes('mongodb'));
 });
 test('principal login binds school and branch and switching is same-school only', async () => {
+  const byPhone = await call('post', '/api/auth/login', { schoolCode: 'oak', email: '+91 98765 43210', password }, null).expect(200);
+  assert.equal(byPhone.body.user.role, 'principal');
+  await call('post', '/api/auth/login', { schoolCode: 'OAK', email: 'principal@oak.test', password }, null).expect(200);
+  await call('post', '/api/auth/login', { schoolCode: 'oak', branchCode: 'north', email: '9876543210', password }, null).expect(200);
   principalToken = (await call('post', '/api/auth/login', { schoolCode: 'oak', branchCode: 'north', email: 'principal@oak.test', password }, null).expect(200)).body.token;
   const branches = (await call('get', '/api/branches', undefined, principalToken).expect(200)).body;
   assert.equal(branches.branches.length, 2);
   await call('get', '/api/owner/schools', undefined, principalToken).expect(403);
   await call('get', '/api/probe', undefined, ownerToken).expect(403);
-  const other = (await call('post', '/api/owner/schools', { name: 'Elm School', code: 'elm', branchName: 'Main', branchCode: 'main', mongoUri: mongo.getUri('elm_main'), principalName: 'Other Principal', principalEmail: 'principal@elm.test', principalPassword: password }).expect(201)).body;
+  const other = (await call('post', '/api/owner/schools', { name: 'Elm School', code: 'elm', branchName: 'Main', branchCode: 'main', mongoUri: mongo.getUri('elm_main'), principalName: 'Other Principal', principalEmail: 'principal@elm.test', principalPhone: '9876543210', principalPassword: password }).expect(201)).body;
   otherBranch = await platform.get().Branch.findOne({ schoolId: other._id });
   await call('post', '/api/branches/switch', { branchId: otherBranch._id }, principalToken).expect(403);
   const switched = (await call('post', '/api/branches/switch', { branchId: branchB._id }, principalToken).expect(200)).body;
@@ -77,7 +86,7 @@ test('overlapping requests and populated references never cross branch databases
   const hash = await bcrypt.hash(password, 4);
   for (const [branch, name] of [[branchA, 'North Teacher'], [south, 'South Teacher']]) {
     await runBranch(school, branch, async () => {
-      await User.create({ _id: teacherId, name, email: 'teacher@test.com', passwordHash: hash, role: 'teacher' });
+      await User.create({ _id: teacherId, name, email: 'teacher@test.com', phone: '9990001234', passwordHash: hash, role: 'teacher' });
       const klass = await SchoolClass.create({ name, grade: '1st', section: 'A', gradeBand: 'Primary' });
       const student = await Student.create({ name: 'Test pupil', admissionNo: '001', classId: klass._id });
       assert.equal((await Student.findById(student._id).populate('classId')).classId.name, name);
@@ -89,6 +98,8 @@ test('overlapping requests and populated references never cross branch databases
     });
   }
   const northToken = (await call('post', '/api/auth/login', { schoolCode: 'oak', branchCode: 'north', email: 'teacher@test.com', password }, null).expect(200)).body.token;
+  const teacherByPhone = await call('post', '/api/auth/login', { schoolCode: 'oak', email: '+91 99900 01234', password }, null).expect(200);
+  assert.equal(teacherByPhone.body.user.role, 'teacher');
   const southToken = (await call('post', '/api/auth/login', { schoolCode: 'oak', branchCode: 'south', email: 'teacher@test.com', password }, null).expect(200)).body.token;
   const requests = Array.from({ length: 20 }, (_, i) => call('get', '/api/probe', undefined, i % 2 ? southToken : northToken).expect(200));
   const results = await Promise.all(requests);
@@ -111,6 +122,28 @@ test('school login resolves branches without a branch code and stays inside the 
   await call('post', '/api/auth/login', { schoolCode: 'oak', email: 'south-parent@test.com', password: 'wrong' }, null).expect(401);
   const repeated = await call('post', '/api/auth/login', { schoolCode: 'oak', email: 'teacher@test.com', password }, null).expect(200);
   assert.equal((await call('get', '/api/probe', undefined, repeated.body.token).expect(200)).body.database, 'oak_north');
+});
+test('new parent accounts require contact details and accept phone login', async () => {
+  const north = await platform.get().Branch.findById(branchA._id).select('+encryptedUri');
+  const child = await runBranch(school, north, () => Student.create({
+    name: 'Parent login pupil', admissionNo: 'parent-phone-1', classId: new mongoose.Types.ObjectId(),
+  }));
+  const body = { name: 'Phone Parent', email: 'phone-parent@oak.test', password,
+    childStudentIds: [String(child._id)] };
+  await call('post', '/api/parents', body, principalToken).expect(400);
+  await call('post', '/api/parents', { ...body, phone: '9988776655' }, principalToken).expect(201);
+  const login = await call('post', '/api/auth/login', { schoolCode: 'oak', email: '+91 99887 76655', password }, null).expect(200);
+  assert.equal(login.body.user.role, 'parent');
+});
+test('new teacher accounts require name, email and phone and accept phone login', async () => {
+  const body = { firstName: 'New Teacher', subject: 'Art', email: 'new-art@oak.test',
+    phone: '9977001122', password };
+  for (const key of ['firstName', 'email', 'phone']) {
+    await call('post', '/api/teachers', { ...body, [key]: '' }, principalToken).expect(400);
+  }
+  await call('post', '/api/teachers', body, principalToken).expect(201);
+  const login = await call('post', '/api/auth/login', { schoolCode: 'oak', email: '+91 99770 01122', password }, null).expect(200);
+  assert.equal(login.body.user.role, 'teacher');
 });
 test('overdue bills restrict principal logins to billing and block operational requests', async () => {
   const invoice = (await call('post', `/api/owner/schools/${school._id}/invoices`, { description: 'Annual ERP subscription', amountMinor: 100000, dueDate: '2020-01-01' }).expect(201)).body;
@@ -155,7 +188,7 @@ test('owner lists school users across branches and edits accounts without changi
   assert.ok(!JSON.stringify(listed).includes('passwordHash'));
   assert.ok(!JSON.stringify(listed).includes('encryptedUri'));
   await call('get', `${base}/users`, undefined, principalToken).expect(403);
-  const filtered = (await call('get', `${base}/users?role=teacher&branchId=${branchB._id}&limit=1`).expect(200)).body;
+  const filtered = (await call('get', `${base}/users?role=teacher&branchId=${branchB._id}&limit=1`).expect(res => assert.equal(res.status, 200, JSON.stringify(res.body)))).body;
   assert.equal(filtered.total, 1);
   assert.equal(filtered.items[0].branchId, String(branchB._id));
   assert.equal((await call('get', `${base}/users?search=${encodeURIComponent('teacher@test.com')}`).expect(200)).body.total, 2);
@@ -169,18 +202,18 @@ test('owner lists school users across branches and edits accounts without changi
   }));
   await call('patch', path, { role: 'principal' }).expect(400);
   await call('patch', path, { email: 'principal@oak.test' }).expect(409);
-  const changed = (await call('patch', path, { name: 'Updated Teacher', email: 'updated-teacher@oak.test', phone: '9876543210', active: false }).expect(200)).body;
+  const changed = (await call('patch', path, { name: 'Updated Teacher', email: 'updated-teacher@oak.test', phone: '9896543210', active: false }).expect(200)).body;
   assert.equal(changed.name, 'Updated Teacher');
   assert.equal(changed.active, false);
   await runBranch(school, south, async () => {
     const user = await User.findById(teacherId);
     assert.equal(user.role, 'teacher');
     assert.equal(user.email, 'updated-teacher@oak.test');
-    assert.equal(user.phone, '9876543210');
+    assert.equal(user.phone, '9896543210');
     const profile = await Teacher.findOne({ userId: teacherId });
     assert.equal(profile.name, 'Updated Teacher');
     assert.equal(profile.email, 'updated-teacher@oak.test');
-    assert.equal(profile.phone, '9876543210');
+    assert.equal(profile.phone, '9896543210');
     assert.equal(profile.status, 'inactive');
   });
   await call('post', '/api/auth/login', { schoolCode: 'oak', branchCode: 'south', email: 'updated-teacher@oak.test', password }, null).expect(403);
@@ -188,9 +221,14 @@ test('owner lists school users across branches and edits accounts without changi
   await call('post', '/api/auth/login', { schoolCode: 'oak', branchCode: 'south', email: 'updated-teacher@oak.test', password }, null).expect(200);
   const principal = listed.items.find(item => item.role === 'principal');
   await call('patch', `${base}/principals/${principal.id}`, { role: 'owner' }).expect(400);
-  await call('patch', `${base}/principals/${principal.id}`, { name: 'Updated Principal', email: 'new-principal@oak.test' }).expect(200);
+  await call('patch', `${base}/principals/${principal.id}`, { name: 'Updated Principal', email: 'new-principal@oak.test', phone: '9765432100' }).expect(200);
   await call('post', '/api/auth/login', { schoolCode: 'oak', branchCode: 'north', email: 'principal@oak.test', password }, null).expect(401);
+  await call('post', '/api/auth/login', { schoolCode: 'oak', branchCode: 'north', email: '9876543210', password }, null).expect(401);
+  await call('post', '/api/auth/login', { schoolCode: 'oak', email: '9765432100', password }, null).expect(200);
   await call('post', '/api/auth/login', { schoolCode: 'oak', branchCode: 'north', email: 'new-principal@oak.test', password }, null).expect(200);
+  await call('patch', `${base}/principals/${principal.id}`, { phone: '9654321000' }).expect(200);
+  await call('post', '/api/auth/login', { schoolCode: 'oak', branchCode: 'north', email: '9765432100', password }, null).expect(401);
+  await call('post', '/api/auth/login', { schoolCode: 'oak', email: '9654321000', password }, null).expect(200);
   await call('patch', `${base}/principals/${principal.id}`, { active: false }).expect(200);
   await call('post', '/api/auth/login', { schoolCode: 'oak', branchCode: 'north', email: 'new-principal@oak.test', password }, null).expect(401);
 });

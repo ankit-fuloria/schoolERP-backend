@@ -40,9 +40,11 @@ after(async () => {
 });
 test('setup creates login credentials, enforces roles and capacity', async () => {
   await post('/drivers', parent, {}).expect(403);
-  const d = (await post('/drivers', admin, { name: 'Driver', phone: '9990001234', password: 'Initial-password-123', licenceNumber: 'DL-123' }).expect(201)).body;
+  await post('/drivers', admin, { name: 'Driver', phone: '9990001234', password: 'Initial-password-123', licenceNumber: 'DL-123' }).expect(400);
+  const d = (await post('/drivers', admin, { name: 'Driver', phone: '9990001234', email: 'driver@test.local', password: 'Initial-password-123', licenceNumber: 'DL-123' }).expect(201)).body;
   driver = await User.findById(d.userId);
   assert.equal(driver.role, 'driver');
+  assert.equal(driver.email, 'driver@test.local');
   vehicle = (await post('/vehicles', admin, { registration: 'DL 01 AB 123', type: 'Bus', capacity: 2, driverId: d._id }).expect(201)).body;
   const rows = children.map(c => ({ studentId: String(c._id), pickup: true, dropoff: true }));
   await request(app).put(`/transport/vehicles/${vehicle._id}/students`).set(auth(admin)).send({ students: rows }).expect(200);

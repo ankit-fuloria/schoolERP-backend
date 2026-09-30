@@ -3,6 +3,7 @@ const SchoolClass = require("../models/SchoolClass");
 const DisabilityOption = require("../models/DisabilityOption");
 const ReservationOption = require("../models/ReservationOption");
 const { logAction } = require("../utils/auditLog");
+const { provisionForStudent } = require('../services/parentProvisioning');
 
 function normalizeStudentPayload(body) {
   const hasDisability = body.hasDisability === true;
@@ -10,9 +11,9 @@ function normalizeStudentPayload(body) {
   const parentDashboardPhoneType = body.parentDashboardPhoneType;
   const parentDashboardPhone =
     parentDashboardPhoneType === "father"
-      ? body.fatherPhone
+      ? body.fatherDetails?.primaryPhone || body.fatherPhone
       : parentDashboardPhoneType === "mother"
-        ? body.motherPhone
+        ? body.motherDetails?.primaryPhone || body.motherPhone
         : undefined;
 
   return {
@@ -196,11 +197,37 @@ async function getStudentSummary(req, res) {
   });
 }
 
+function studentCreationError(body) {
+  const { name, admissionNo, classId, gender, dateOfBirth, category, parentDashboardPhoneType } = body;
+  if (typeof name !== "string" || !name.trim() ||
+      typeof admissionNo !== "string" || !admissionNo.trim() || !classId ||
+      !["Male", "Female", "Other"].includes(gender) ||
+      !dateOfBirth || Number.isNaN(Date.parse(dateOfBirth)) ||
+      !["General", "SC", "ST", "OBC"].includes(category)) {
+    return "Name, admission number, class, gender, date of birth and caste/category are required";
+  }
+  if (!["father", "mother"].includes(parentDashboardPhoneType)) {
+    return "Select a phone for parent dashboard login";
+  }
+  const loginPhone = parentDashboardPhoneType === "father"
+    ? body.fatherDetails?.primaryPhone || body.fatherPhone
+    : body.motherDetails?.primaryPhone || body.motherPhone;
+  if (!loginPhone || String(loginPhone).replace(/\D/g, "").length !== 10) {
+    return "Selected parent dashboard phone must have 10 digits";
+  }
+  if (body.hasDisability === true && !body.disabilityType?.trim()) {
+    return "Select a disability type";
+  }
+  if (body.hasReservation === true && !body.reservationType?.trim()) {
+    return "Select a reservation type";
+  }
+  return null;
+}
+
 async function createStudent(req, res) {
   const { name, admissionNo, classId } = req.body;
-  if (!name || !admissionNo || !classId) {
-    return res.status(400).json({ message: "name, admissionNo and classId are required" });
-  }
+  const validationError = studentCreationError(req.body);
+  if (validationError) return res.status(400).json({ message: validationError });
 
   const schoolClass = await SchoolClass.findById(classId);
   if (!schoolClass) {
@@ -218,6 +245,13 @@ async function createStudent(req, res) {
     classId,
     ...normalizeStudentPayload(req.body),
   });
+
+  try {
+    await provisionForStudent(student, req.tenant?.school?.code || 'LEGACY');
+  } catch (error) {
+    await Student.deleteOne({ _id: student._id });
+    throw error;
+  }
 
   if (req.body.siblingIds && req.body.siblingIds.length) {
     await Student.updateMany(
@@ -325,6 +359,7 @@ async function createReservationOption(req, res) {
 }
 
 module.exports = {
+  studentCreationError,
   listStudents,
   getStudentSummary,
   createStudent,

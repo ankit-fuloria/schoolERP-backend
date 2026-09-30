@@ -59,6 +59,7 @@ before(async () => {
     mongoUri: mongo.getUri('oakridge_main'),
     principalName: 'Dr. Principal',
     principalEmail: 'principal@oakridge.test',
+    principalPhone: '9876543210',
     principalPassword: password,
   };
   school = (await call('post', '/api/owner/schools', payload).expect(201)).body;
@@ -153,7 +154,7 @@ test('Owner Admin can retrieve audit logs of each school across its branches', a
   // Call GET /api/owner/schools/:id/logs
   const res = await call('get', `/api/owner/schools/${school._id}/logs`, undefined, ownerToken).expect(200);
 
-  assert.equal(res.body.school.code, 'oakridge');
+  assert.equal(res.body.school.code, 'OAKRIDGE');
   assert.ok(Array.isArray(res.body.items));
   assert.ok(res.body.total >= 1);
   assert.ok(res.body.items.some(l => l.note.includes('Created class 10-A')));

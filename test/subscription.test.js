@@ -11,7 +11,7 @@ let mongo, app, token, owner, school;
 const today = billing.istDate(new Date());
 const subscription = { cycle: 'quarterly', cycleAmountMinor: 100000, monthlyMaintenanceMinor: 10000, firstBillingDate: today };
 const call = (method, path, body) => request(app)[method](path).set('Authorization', `Bearer ${token}`).send(body);
-const payload = () => ({ name: 'New School', code: 'UNIQUE', principalName: 'Admin', principalEmail: 'admin@example.test', principalPassword: 'Strong-password-123', subscription,
+const payload = () => ({ name: 'New School', code: 'UNIQUE', principalName: 'Admin', principalEmail: 'admin@example.test', principalPhone: '9876543210', principalPassword: 'Strong-password-123', subscription,
   branches: [{ name: 'North', code: 'north', mongoUri: mongo.getUri('north'), isMain: false }, { name: 'Main', code: 'main', mongoUri: mongo.getUri('main'), isMain: true }] });
 before(async () => {
   process.env.JWT_SECRET = 'test-billing';
@@ -42,7 +42,7 @@ test('multi-branch school requires one main branch and independent databases', a
   const created = await call('post', '/owner/schools', payload());
   assert.equal(created.status, 201, JSON.stringify(created.body));
   school = created.body;
-  assert.equal(school.code, 'unique');
+  assert.equal(school.code, 'UNIQUE');
   assert.equal(await platform.get().Branch.countDocuments({ schoolId: school._id }), 2);
   assert.equal(await platform.get().Branch.countDocuments({ schoolId: school._id, isMain: true }), 1);
   const dup = payload(); dup.code = ' Unique ';

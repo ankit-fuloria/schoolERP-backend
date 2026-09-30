@@ -4,6 +4,7 @@ const platform = require('./platform');
 const { acquire } = require('./connections');
 const { storage } = require('./context');
 const User = require('../models/User');
+const accountPhone = require('../utils/accountPhone');
 
 function fail(status, message) { throw Object.assign(new Error(message), { status }); }
 async function checkSchool(school, branch) {
@@ -23,16 +24,22 @@ async function loginBranch(school, body) {
   const branches = await Branch.find({ schoolId: school._id }).sort({ isMain: -1, createdAt: 1, _id: 1 }).select('+encryptedUri');
   if (typeof body.email !== 'string' || typeof body.password !== 'string' || !body.email.trim() || !body.password) fail(400, 'Email/mobile and password are required');
   const identifier = body.email.trim();
-  const principal = await Principal.findOne({ schoolId: school._id, email: identifier.toLowerCase() });
+  const phone = accountPhone.pattern(identifier);
+  const loginFilter = { $or: [{ email: identifier.toLowerCase() }, ...(phone ? [{ phone }] : [])] };
+  const principal = await Principal.findOne({ schoolId: school._id, ...loginFilter });
   if (principal) {
-    if (!principal.active || !await bcrypt.compare(body.password, principal.passwordHash)) fail(401, 'Invalid email or password');
-    return branches[0];
+    if (await bcrypt.compare(body.password, principal.passwordHash)) {
+      if (!principal.active) fail(401, 'Invalid email or password');
+      return branches[0];
+    }
+    if (principal.email === identifier.toLowerCase()) fail(401, 'Invalid email or password');
   }
   await checkSchool(school, branches.find(b => b.active));
   for (const branch of branches.filter(b => b.active)) {
     const matches = await runBranch(school, branch, async () => {
-      const user = await User.findOne({ active: true, $or: [{ email: identifier.toLowerCase() }, { phone: identifier }] });
-      return user && await bcrypt.compare(body.password, user.passwordHash);
+      const users = await User.find({ active: true, ...loginFilter });
+      for (const user of users) if (await bcrypt.compare(body.password, user.passwordHash)) return true;
+      return false;
     });
     if (matches) return branch;
   }
@@ -43,8 +50,8 @@ async function gate(req, res, next) {
     const { School, Branch, Principal } = platform.get();
     let school, branch, claims;
     if (req.path === '/auth/login' && req.method === 'POST') {
-      const schoolCode = String(req.body.schoolCode || 'legacy').trim().toLowerCase();
-      school = await School.findOne({ code: schoolCode });
+      const schoolCode = String(req.body.schoolCode || 'legacy').trim();
+      school = await School.findOne({ code: new RegExp(`^${schoolCode.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') });
       branch = await loginBranch(school, req.body);
     } else {
       const header = req.headers.authorization || '';
@@ -55,7 +62,7 @@ async function gate(req, res, next) {
         school = await School.findById(claims.schoolId);
         branch = await Branch.findById(claims.branchId).select('+encryptedUri');
       } else {
-        school = await School.findOne({ code: 'legacy' });
+        school = await School.findOne({ code: /^legacy$/i });
         branch = school && await Branch.findOne({ schoolId: school._id, legacy: true }).select('+encryptedUri');
       }
       if (claims.principalId && !await Principal.exists({ _id: claims.principalId, schoolId: school?._id, active: true })) fail(403, 'Principal account is disabled');
@@ -63,7 +70,10 @@ async function gate(req, res, next) {
     const schoolAccess = await require('../services/ownerBilling').schoolStatus(school, branch);
     let principalLogin = false;
     if (req.path === '/auth/login' && req.method === 'POST' && school) {
-      const principal = await Principal.findOne({ schoolId: school._id, email: String(req.body.email || '').trim().toLowerCase(), active: true });
+      const identifier = String(req.body.email || '').trim();
+      const phone = accountPhone.pattern(identifier);
+      const principal = await Principal.findOne({ schoolId: school._id, active: true,
+        $or: [{ email: identifier.toLowerCase() }, ...(phone ? [{ phone }] : [])] });
       principalLogin = Boolean(principal && typeof req.body.password === 'string' && await bcrypt.compare(req.body.password, principal.passwordHash));
     }
     const principalBilling = claims?.role === 'principal' && req.method === 'GET' && req.path === '/dashboard/billing';
@@ -98,9 +108,15 @@ async function principalUser(principal) {
 async function authenticatePrincipal(email, password) {
   const scope = storage.getStore();
   if (!scope) return null;
-  const principal = await platform.get().Principal.findOne({ schoolId: scope.school._id, email: email.toLowerCase() });
+  const phone = accountPhone.pattern(email);
+  const principal = await platform.get().Principal.findOne({ schoolId: scope.school._id,
+    $or: [{ email: email.toLowerCase() }, ...(phone ? [{ phone }] : [])] });
   if (!principal) return null;
-  if (!principal.active || !await bcrypt.compare(password, principal.passwordHash)) fail(401, 'Invalid email or password');
+  if (!await bcrypt.compare(password, principal.passwordHash)) {
+    if (principal.email === email.toLowerCase()) fail(401, 'Invalid email or password');
+    return null;
+  }
+  if (!principal.active) fail(401, 'Invalid email or password');
   return principalUser(principal);
 }
 async function linkLegacyPrincipal(user) {

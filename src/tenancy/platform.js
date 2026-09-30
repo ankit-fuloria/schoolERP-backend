@@ -17,7 +17,7 @@ async function connect(uri = process.env.OWNER_MONGODB_URI || process.env.MONGOD
     tokenVersion: { type: Number, default: 0 },
   }));
   const School = connection.model('School', schema({
-    name: { type: String, required: true }, code: { type: String, unique: true, required: true, lowercase: true, trim: true },
+    name: { type: String, required: true }, code: { type: String, unique: true, required: true, trim: true },
     logoUrl: { type: String, default: '' },
     active: { type: Boolean, default: true },
     subscription: {

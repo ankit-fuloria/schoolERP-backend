@@ -41,7 +41,7 @@ test('staff can log in with email or saved phone number using the same password'
     assert.deepEqual(response.body.user.permissions, ['fees']);
     assert.equal(jwt.verify(response.body.token, process.env.JWT_SECRET).role, 'staff');
   }
-  for (const email of ['cashier@access.test', '9990001234']) {
+  for (const email of ['cashier@access.test', '9990001234', '+91 99900 01234']) {
     await request(app).post('/api/auth/login').send({ email, password: 'wrong-password' }).expect(401);
   }
   await request(app).post('/api/auth/login').send({ email: '9990001234', password: '' }).expect(400);
@@ -96,6 +96,9 @@ test('departments can be added before saving staff and deduplicate case-insensit
 });
 test('staff dates and enum gender save correctly; invalid values do not create orphan logins', async () => {
   const body = { firstName: 'New staff', department: 'Administration', email: 'new@access.test', phone: '9991234567', password: 'test-password', permissions: ['fees'], dateOfBirth: '1995-04-12', dateOfJoining: '2026-09-01', weddingDate: '2020-01-15', gender: 'female' };
+  for (const key of ['firstName', 'email', 'phone']) {
+    await request(app).post('/api/staff').set(headers(principal)).send({ ...body, [key]: '' }).expect(400);
+  }
   await request(app).post('/api/staff').set(headers(principal)).send({ ...body, gender: 'invalid' }).expect(400);
   assert.equal(await User.countDocuments({ email: body.email }), 0);
   const saved = (await request(app).post('/api/staff').set(headers(principal)).send(body).expect(201)).body;

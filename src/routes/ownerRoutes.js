@@ -11,6 +11,7 @@ const platform = require('../tenancy/platform');
 const databases = require('../tenancy/connections');
 const billing = require('../tenancy/billing');
 const { fail } = require('../tenancy/access');
+const accountPhone = require('../utils/accountPhone');
 const router = express.Router();
 const wrap = fn => (req, res, next) => Promise.resolve(fn(req, res)).catch(next);
 
@@ -133,8 +134,8 @@ async function databaseKey(uri) {
 router.post('/schools', wrap(async (req, res) => {
   const { School, Branch, Principal } = platform.get();
   const b = req.body;
-  const name = text(b.name, 'School name'); const schoolCode = code(b.code);
-  if (await School.exists({ code: schoolCode })) fail(409, 'School code is already in use. Choose a unique code.');
+  const name = text(b.name, 'School name'); const schoolCode = code(b.code).toUpperCase();
+  if (await School.exists({ code: new RegExp(`^${schoolCode}$`, 'i') })) fail(409, 'School code is already in use. Choose a unique code.');
   const inputs = b.branches ?? [{ name: b.branchName, code: b.branchCode, mongoUri: b.mongoUri, isMain: true }];
   if (!Array.isArray(inputs) || inputs.length < 1 || inputs.length > 50) fail(400, 'Add between 1 and 50 branches');
   if (inputs.some(x => !x || typeof x.isMain !== 'boolean') || inputs.filter(x => x.isMain).length !== 1) fail(400, 'Choose exactly one main branch');
@@ -145,7 +146,7 @@ router.post('/schools', wrap(async (req, res) => {
     const name = text(input.name, 'Branch name'); const branchCode = code(input.code);
     if (branchCodes.has(branchCode)) fail(400, 'Branch codes must be unique within the school');
     branchCodes.add(branchCode);
-    const dbName = input.isMain ? schoolCode : `${schoolCode}-${branchCode}`;
+    const dbName = input.isMain ? schoolCode.toLowerCase() : `${schoolCode.toLowerCase()}-${branchCode}`;
     const defaultUri = buildMongoUri(process.env.MONGODB_URI, dbName);
     const uri = (typeof input.mongoUri === 'string' && input.mongoUri.trim()) ? input.mongoUri.trim() : defaultUri;
 
@@ -158,6 +159,7 @@ router.post('/schools', wrap(async (req, res) => {
   const pricing = b.pricing ? await ownerBilling.pricing(b.pricing) : undefined;
   const principalName = text(b.principalName, 'Principal name');
   const email = text(b.principalEmail, 'Principal email').toLowerCase();
+  const principalPhone = accountPhone.required(b.principalPhone);
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) fail(400, 'Enter a valid principal email');
   if (typeof b.principalPassword !== 'string' || b.principalPassword.length < 12 || b.principalPassword.length > 72) fail(400, 'Principal password must contain 12 to 72 characters');
   const passwordHash = await bcrypt.hash(b.principalPassword, 12);
@@ -169,7 +171,7 @@ router.post('/schools', wrap(async (req, res) => {
     [school] = await School.create([{ name, code: schoolCode, logoUrl, subscription, pricing }], { session });
     await logos.reserve(logoUrl, school._id, session);
     await Branch.create(branches.map(branch => ({ ...branch, schoolId: school._id })), { session, ordered: true });
-    await Principal.create([{ schoolId: school._id, name: principalName, email, passwordHash }], { session });
+    await Principal.create([{ schoolId: school._id, name: principalName, email, phone: principalPhone, passwordHash }], { session });
     await billing.notify(school, `school:${school._id}`, `${name}: school subscription created`,
       `School ${name} (${schoolCode}) has been created with ${branches.length} branches.\n${pricing ? `ERP cost after discount: INR ${(pricing.erpNetMinor / 100).toFixed(2)}\nMaintenance cycle: ${pricing.cycle}\nMonthly maintenance: INR ${(pricing.monthlyMaintenanceMinor / 100).toFixed(2)}\nFree maintenance months: ${pricing.freeMonths}\nFirst maintenance period: ${pricing.firstMaintenanceDate}` : 'Payment plan has not been configured.'}\nInvoices will be issued separately by Lavener Holdings.`, session);
   }); } finally { await session.endSession(); }
@@ -212,7 +214,7 @@ router.post('/schools/:id/branches', wrap(async (req, res) => {
   const school = await School.findById(req.params.id);
   if (!school) fail(404, 'School not found');
   const name = text(req.body.name, 'Branch name'); const branchCode = code(req.body.code);
-  const dbName = `${school.code}-${branchCode}`;
+  const dbName = `${school.code.toLowerCase()}-${branchCode}`;
   const defaultUri = buildMongoUri(process.env.MONGODB_URI, dbName);
   const uri = (typeof req.body.mongoUri === 'string' && req.body.mongoUri.trim()) ? req.body.mongoUri.trim() : defaultUri;
   const key = await databaseKey(uri);

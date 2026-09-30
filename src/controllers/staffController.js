@@ -3,6 +3,7 @@ const Staff = require("../models/Staff");
 const User = require("../models/User");
 const StaffDepartment = require('../models/StaffDepartment');
 const { logAction, redactSecrets } = require("../utils/auditLog");
+const accountPhone = require('../utils/accountPhone');
 
 const DETAIL_FIELDS = [
   "firstName", "middleName", "lastName", "dateOfBirth", "gender", "bloodGroup",
@@ -124,16 +125,18 @@ async function create(req, res) {
   const { firstName, middleName, lastName, department, email, phone, password, permissions } =
     req.body;
   const name = [firstName, middleName, lastName].filter(Boolean).join(" ").trim();
-  if (!firstName || !department || !email || !phone || !password) {
+  if (typeof firstName !== 'string' || !firstName.trim() || !department || !email || !phone || !password) {
     return res.status(400).json({
       message: "first name, department, phone, email and password are required",
     });
   }
+  if (typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) return res.status(400).json({ message: 'Enter a valid email address' });
+  const contactPhone = accountPhone.required(phone);
   // Validate profile fields before creating a login account.
   await new Staff({ ...detailValues(req.body), name, firstName, department, email, permissions: cleanPermissions(permissions) }).validate();
 
   const existing = await User.findOne({
-    $or: [{ email: email.toLowerCase() }, { phone }],
+    $or: [{ email: email.trim().toLowerCase() }, { phone: accountPhone.pattern(contactPhone) }],
   });
   if (existing) {
     return res.status(400).json({ message: "That email or phone number is already in use" });
@@ -141,8 +144,8 @@ async function create(req, res) {
   const passwordHash = await bcrypt.hash(password, 10);
   const user = await User.create({
     name,
-    email: email.toLowerCase(),
-    phone,
+    email: email.trim().toLowerCase(),
+    phone: contactPhone,
     passwordHash,
     role: "staff",
   });
@@ -159,7 +162,7 @@ async function create(req, res) {
     disabilityType: req.body.hasDisability === true ? req.body.disabilityType : undefined,
     disabilityDocumentUrl:
       req.body.hasDisability === true ? req.body.disabilityDocumentUrl : undefined,
-    phone,
+    phone: contactPhone,
     emergencyContact: req.body.emergencyContact,
     idProofType: req.body.idProofType,
     idProofDocumentUrl: req.body.idProofDocumentUrl,
@@ -171,7 +174,7 @@ async function create(req, res) {
     otherDocumentUrl: req.body.otherDocumentUrl,
     department,
     permissions: cleanPermissions(permissions),
-    email: email.toLowerCase(),
+    email: email.trim().toLowerCase(),
     userId: user._id,
     ...detailValues(req.body),
   });

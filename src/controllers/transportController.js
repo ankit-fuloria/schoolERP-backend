@@ -5,6 +5,7 @@ const Student = require('../models/Student');
 const User = require('../models/User');
 const { connection } = require('../tenancy/context');
 const { logAction } = require('../utils/auditLog');
+const accountPhone = require('../utils/accountPhone');
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
 const today = () => new Date(Date.now() + 330 * 60000).toISOString().slice(0, 10);
 const id = value => { if (!mongoose.isValidObjectId(value)) fail(400, 'Invalid identifier'); return String(value); };
@@ -61,11 +62,10 @@ async function adminData(req, res) {
   res.json({ vehicles, drivers, assignments, trips, students, date: today() });
 }
 async function saveDriver(req, res) {
-  const b = req.body, name = text(b.name, 'Name'), phone = text(b.phone, 'Phone', true, 20);
+  const b = req.body, name = text(b.name, 'Name'), phone = accountPhone.required(b.phone);
   if (b.active != null && typeof b.active !== 'boolean') fail(400, 'Active must be a boolean');
-  if (!/^\+?[0-9]{7,15}$/.test(phone)) fail(400, 'Enter a valid mobile number');
-  const email = b.email ? text(b.email, 'Email').toLowerCase() : undefined;
-  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) fail(400, 'Invalid email');
+  const email = text(b.email, 'Email').toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) fail(400, 'Invalid email');
   if ((!req.params.id || b.password) && (typeof b.password !== 'string' || b.password.length < 12 || b.password.length > 72)) fail(400, 'Initial password must have 12 to 72 characters');
   const fields = { name, phone, email, address: text(b.address, 'Address', false, 1000),
     emergencyContact: text(b.emergencyContact, 'Emergency contact', false),
@@ -76,16 +76,16 @@ async function saveDriver(req, res) {
     let driver = req.params.id ? await Driver.findById(id(req.params.id)).session(session) : null;
     if (req.params.id && !driver) fail(404, 'Driver not found');
     if (driver && await Trip.exists({ driverId: driver._id, status: 'active' }).session(session)) fail(409, 'Complete the driver\'s active trip first');
-    const conflict = await User.exists({ _id: { $ne: driver?.userId }, $or: [{ phone }, ...(email ? [{ email }] : [])] }).session(session);
+    const conflict = await User.exists({ _id: { $ne: driver?.userId }, $or: [{ phone: accountPhone.pattern(phone) }, { email }] }).session(session);
     if (conflict) fail(409, 'Phone or email is already used by another account');
     const userId = driver?.userId || new mongoose.Types.ObjectId();
     const active = b.active !== false;
     if (driver) {
-      await User.updateOne({ _id: userId }, { $set: { name, phone, active, ...(email ? { email } : {}), ...(passwordHash ? { passwordHash } : {}) } }, { session });
+      await User.updateOne({ _id: userId }, { $set: { name, phone, email, active, ...(passwordHash ? { passwordHash } : {}) } }, { session });
       Object.assign(driver, fields, { active }, passwordHash ? { mustChangePassword: true } : {});
       await driver.save({ session });
     } else {
-      await User.create([{ _id: userId, name, phone, email: email || `driver-${userId}@school.internal`, passwordHash, role: 'driver', active }], { session });
+      await User.create([{ _id: userId, name, phone, email, passwordHash, role: 'driver', active }], { session });
       [driver] = await Driver.create([{ ...fields, userId, active }], { session });
     }
     return driver;
